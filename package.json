@@ -1,0 +1,38 @@
+{
+  "name": "via-v2",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "build": "bun build src/main.ts --outdir ./dist --target bun",
+    "compile": "bun build src/main.ts --compile --outfile via-v2",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check src/",
+    "format": "biome format --write src/"
+  },
+  "dependencies": {
+    "hono": "latest",
+    "drizzle-orm": "latest",
+    "drizzle-kit": "latest",
+    "pg": "latest",
+    "@qdrant/js-client-rest": "latest",
+    "zod": "latest",
+    "json5": "latest",
+    "jsonl": "latest",
+    "winston": "latest"
+  },
+  "devDependencies": {
+    "@types/pg": "latest",
+    "@types/node": "latest",
+    "bun-types": "latest",
+    "@biomejs/biome": "latest",
+    "typescript": "latest",
+    "@types/bun": "latest"
+  },
+  "private": true
+}

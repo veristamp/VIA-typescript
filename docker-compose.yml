@@ -1,0 +1,39 @@
+services:
+  # via-v2:
+  #   build: .
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - POSTGRES_HOST=postgres
+  #     - POSTGRES_PORT=5432
+  #     - POSTGRES_DB=via_registry
+  #     - POSTGRES_USER=via
+  #     - POSTGRES_PASSWORD=via
+  #     - QDRANT_HOST=qdrant-1
+  #     - QDRANT_PORT=6333
+  #   depends_on:
+  #     - postgres
+  #     - qdrant-1
+  #   restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=via_registry
+      - POSTGRES_USER=via
+      - POSTGRES_PASSWORD=via
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  qdrant-1:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_data/node1:/qdrant/storage
+
+volumes:
+  postgres_data:

@@ -1,0 +1,9 @@
+[install]
+cache = true
+
+[test]
+coverage = true
+
+[build]
+minify = true
+sourcemap = "external"

@@ -1,0 +1,471 @@
+import { QdrantClient } from "@qdrant/js-client-rest";
+import { settings } from "../config/settings";
+
+export interface QdrantPoint {
+	id: string;
+	vector: number[];
+	payload: Record<string, unknown>;
+}
+
+export interface Tier2Event {
+	textForEmbedding: string;
+	payload: Record<string, unknown>;
+}
+
+export interface QdrantScoredPoint {
+	id: string | number;
+	score: number;
+	payload?: Record<string, unknown>;
+	version?: number;
+}
+
+export class QdrantService {
+	private client: QdrantClient;
+	private tier1Dim: number = 64;
+	private tier2Dim: number = 384;
+	private tier1CollectionPrefix: string = "via_tier1_monitor";
+	private tier2CollectionPrefix: string = "via_forensic_index_v2";
+	private embeddingUrl: string;
+
+	constructor() {
+		this.client = new QdrantClient({
+			url: `http://${settings.qdrant.host}:${settings.qdrant.port}`,
+		});
+		this.embeddingUrl = process.env.EMBEDDING_URL || "http://localhost:8080";
+	}
+
+	get tier1Dimension(): number {
+		return this.tier1Dim;
+	}
+
+	get tier2Dimension(): number {
+		return this.tier2Dim;
+	}
+
+	private getDailyCollectionName(prefix: string, ts: number): string {
+		const date = new Date(ts * 1000);
+		const year = date.getFullYear();
+		const month = String(date.getMonth() + 1).padStart(2, "0");
+		const day = String(date.getDate()).padStart(2, "0");
+		return `${prefix}_${year}_${month}_${day}`;
+	}
+
+	private getCollectionsForWindow(
+		prefix: string,
+		startTs: number,
+		endTs: number,
+	): string[] {
+		const startDate = new Date(startTs * 1000);
+		const endDate = new Date(endTs * 1000);
+		const collections: string[] = [];
+
+		const currentDate = new Date(startDate);
+		while (currentDate <= endDate) {
+			const year = currentDate.getFullYear();
+			const month = String(currentDate.getMonth() + 1).padStart(2, "0");
+			const day = String(currentDate.getDate()).padStart(2, "0");
+			collections.push(`${prefix}_${year}_${month}_${day}`);
+			currentDate.setDate(currentDate.getDate() + 1);
+		}
+
+		return collections;
+	}
+
+	async setupCollections(): Promise<void> {
+		console.log("Setting up Tier 1 collection with Binary Quantization...");
+
+		try {
+			await this.client.createCollection(this.tier1CollectionPrefix, {
+				vectors: {
+					size: this.tier1Dim,
+					distance: "Dot",
+				},
+				quantization_config: {
+					binary: {
+						always_ram: true,
+					},
+				},
+				replication_factor: 1,
+				shard_number: 1,
+			});
+
+			await this.client.createPayloadIndex(this.tier1CollectionPrefix, {
+				field_name: "ts",
+				field_schema: "integer",
+			});
+
+			console.log("Tier 1 collection created successfully");
+
+			const todayTs = Math.floor(Date.now() / 1000);
+			const todayCollection = this.getDailyCollectionName(
+				this.tier2CollectionPrefix,
+				todayTs,
+			);
+			await this.ensureDailyTier2Collection(todayCollection);
+		} catch (error) {
+			console.error("Error setting up collections:", error);
+			throw error;
+		}
+	}
+
+	private async ensureDailyTier2Collection(
+		collectionName: string,
+	): Promise<void> {
+		try {
+			const collectionExists = await this.client.getCollection(collectionName);
+			if (collectionExists) {
+				return;
+			}
+
+			console.log(`Creating daily Tier 2 collection: ${collectionName}`);
+
+			await this.client.createCollection(collectionName, {
+				vectors: {
+					log_dense_vector: {
+						size: this.tier2Dim,
+						distance: "Cosine",
+						on_disk: true,
+					},
+				},
+				sparse_vectors: {
+					bm25_vector: {
+						modifier: "idf",
+					},
+				},
+				replication_factor: 1,
+				shard_number: 1,
+				quantization_config: {
+					scalar: {
+						type: "int8",
+						quantile: 0.99,
+						always_ram: true,
+					},
+				},
+				optimizers_config: {
+					default_segment_number: 2,
+					indexing_threshold: 20000,
+				},
+			});
+
+			await this.client.createPayloadIndex(collectionName, {
+				field_name: "start_ts",
+				field_schema: "integer",
+			});
+
+			await this.client.createPayloadIndex(collectionName, {
+				field_name: "service",
+				field_schema: "keyword",
+			});
+
+			await this.client.createPayloadIndex(collectionName, {
+				field_name: "rhythm_hash",
+				field_schema: "keyword",
+			});
+
+			await this.client.createPayloadIndex(collectionName, {
+				field_name: "body",
+				field_schema: {
+					type: "text",
+					tokenizer: "word",
+					lowercase: true,
+				},
+			});
+		} catch (error) {
+			console.error(`Error creating collection ${collectionName}:`, error);
+			throw error;
+		}
+	}
+
+	async upsertTier1Points(points: QdrantPoint[]): Promise<number> {
+		if (!points || points.length === 0) {
+			return 0;
+		}
+
+		const qdrantPoints = points.map((pt) => ({
+			id: pt.id,
+			vector: pt.vector,
+			payload: pt.payload,
+		}));
+
+		await this.client.upsert(this.tier1CollectionPrefix, {
+			points: qdrantPoints,
+			wait: false,
+		});
+
+		return points.length;
+	}
+
+	async ingestToTier2(events: Tier2Event[]): Promise<void> {
+		if (events.length === 0) return;
+
+		// Group events by target collection
+		const eventsByCollection = new Map<string, Tier2Event[]>();
+
+		for (const event of events) {
+			const startTs = event.payload.start_ts as number;
+			const collectionName = this.getDailyCollectionName(
+				this.tier2CollectionPrefix,
+				startTs,
+			);
+
+			if (!eventsByCollection.has(collectionName)) {
+				eventsByCollection.set(collectionName, []);
+			}
+			eventsByCollection.get(collectionName)?.push(event);
+		}
+
+		// Process each collection
+		for (const [collection, collectionEvents] of eventsByCollection) {
+			await this.ensureDailyTier2Collection(collection);
+
+			const points = await Promise.all(
+				collectionEvents.map(async (event) => {
+					const denseVector = await this.getEmbedding(event.textForEmbedding);
+					const sparseVector = await this.generateSparseVector(
+						event.textForEmbedding,
+					);
+
+					return {
+						id: this.generateId(),
+						vector: {
+							log_dense_vector: denseVector,
+							bm25_vector: sparseVector,
+						},
+						payload: event.payload,
+					};
+				}),
+			);
+
+			await this.client.upsert(collection, {
+				points,
+				wait: false,
+			});
+		}
+	}
+
+	async getPointsFromTier1(startTs: number, endTs: number): Promise<unknown[]> {
+		try {
+			const result = await this.client.scroll(this.tier1CollectionPrefix, {
+				limit: 100000,
+				with_payload: true,
+				with_vector: true,
+				filter: {
+					must: [
+						{
+							key: "ts",
+							range: {
+								gte: startTs,
+								lte: endTs,
+							},
+						},
+					],
+				},
+			});
+
+			const points = (result as { points?: unknown[] })?.points || [];
+
+			return points;
+		} catch (error) {
+			console.error("Error getting points from Tier 1:", error);
+			return [];
+		}
+	}
+
+	async getHistoricalBaseline(
+		windowStartTs: number,
+		sampleSize: number = 10000,
+	): Promise<unknown[]> {
+		try {
+			const result = await this.client.scroll(this.tier1CollectionPrefix, {
+				limit: sampleSize,
+				with_payload: true,
+				with_vector: true,
+				order_by: {
+					key: "ts",
+					direction: "desc",
+				},
+				filter: {
+					must: [
+						{
+							key: "ts",
+							range: {
+								lt: windowStartTs,
+							},
+						},
+					],
+				},
+			});
+
+			const points = (result as { points?: unknown[] })?.points || [];
+
+			return points;
+		} catch (error) {
+			console.error("Error getting historical baseline:", error);
+			return [];
+		}
+	}
+
+	async findTier2Clusters(
+		startTs: number,
+		endTs: number,
+		textFilter?: string,
+	): Promise<QdrantScoredPoint[]> {
+		const collections = this.getCollectionsForWindow(
+			this.tier2CollectionPrefix,
+			startTs,
+			endTs,
+		);
+
+		if (collections.length === 0) {
+			return [];
+		}
+
+		let queryVector: number[] | null = null;
+		let queryFilter: Record<string, unknown> | null = null;
+
+		if (textFilter) {
+			queryVector = await this.getEmbedding(textFilter);
+			queryFilter = {
+				must: [
+					{
+						key: "body",
+						match: {
+							text: textFilter,
+						},
+					},
+				],
+			};
+		} else {
+			queryVector = new Array(this.tier2Dim).fill(0);
+		}
+
+		const namedVector = {
+			name: "log_dense_vector",
+			vector: queryVector,
+		};
+
+		const searchPromises = collections.map((collection) =>
+			this.client.search(collection, {
+				vector: namedVector,
+				filter: queryFilter,
+				limit: 100,
+				with_payload: true,
+			}),
+		);
+
+		try {
+			const results = await Promise.all(searchPromises);
+			const allHits = results.flatMap((r) => r || []);
+
+			const grouped = new Map<string, QdrantScoredPoint>();
+			for (const hit of allHits) {
+				const rhythmHash = hit.payload?.rhythm_hash as string | undefined;
+				if (rhythmHash && !grouped.has(rhythmHash)) {
+					grouped.set(rhythmHash, hit as QdrantScoredPoint);
+				}
+			}
+
+			return Array.from(grouped.values());
+		} catch (error) {
+			console.error("Error finding Tier 2 clusters:", error);
+			return [];
+		}
+	}
+
+	async triageSimilarEvents(
+		positiveIds: string[],
+		negativeIds: string[],
+		startTs: number,
+		endTs: number,
+	): Promise<QdrantScoredPoint[]> {
+		const collections = this.getCollectionsForWindow(
+			this.tier2CollectionPrefix,
+			startTs,
+			endTs,
+		);
+
+		if (collections.length === 0 || positiveIds.length === 0) {
+			return [];
+		}
+
+		const recommendPromises = collections.map((collection) =>
+			this.client.recommend(collection, {
+				positive: positiveIds,
+				negative: negativeIds,
+				using: "log_dense_vector",
+				limit: 50,
+				with_payload: true,
+			}),
+		);
+
+		try {
+			const results = await Promise.all(recommendPromises);
+			const allHits = results.flatMap((r) => r || []);
+
+			allHits.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+			return allHits.slice(0, 50) as QdrantScoredPoint[];
+		} catch (error) {
+			console.error("Error triaging similar events:", error);
+			return [];
+		}
+	}
+
+	private async getEmbedding(text: string): Promise<number[]> {
+		try {
+			const response = await fetch(`${this.embeddingUrl}/embeddings`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ input: text }),
+			});
+
+			if (!response.ok) {
+				console.warn(`Embedding service unavailable, using fallback`);
+				return this.generateFallbackVector(text);
+			}
+
+			const data = (await response.json()) as { embeddings?: number[][] };
+			return data.embeddings?.[0] || this.generateFallbackVector(text);
+		} catch {
+			console.warn(`Embedding request failed, using fallback`);
+			return this.generateFallbackVector(text);
+		}
+	}
+
+	private generateFallbackVector(text: string): number[] {
+		const hash = Bun.hash.xxHash64(text);
+		const vector: number[] = [];
+
+		for (let i = 0; i < this.tier2Dim; i++) {
+			const byteIndex = Math.floor(i / 8);
+			const byteValue = Number((hash >> BigInt(byteIndex * 8)) & 0xffn);
+			const bitIndex = i % 8;
+			const bitValue = (byteValue >> (7 - bitIndex)) & 1;
+			vector.push(bitValue === 1 ? 1.0 : 0.0);
+		}
+
+		return vector;
+	}
+
+	private async generateSparseVector(
+		text: string,
+	): Promise<{ indices: number[]; values: number[] }> {
+		const words = text.toLowerCase().split(/\s+/);
+		const indices: number[] = [];
+		const values: number[] = [];
+
+		for (const word of words) {
+			const hash = Bun.hash.xxHash64(word);
+			const hashValue = Number(hash & 0xffn);
+			indices.push(hashValue % 1000);
+			values.push(1 + words.filter((w) => w === word).length / words.length);
+		}
+
+		return { indices, values };
+	}
+
+	private generateId(): string {
+		const hash = Bun.hash.xxHash64(`${Date.now()}-${Math.random()}`);
+		return hash.toString(16);
+	}
+}
