@@ -1,8 +1,8 @@
-pub mod types;
 pub mod scenarios;
+pub mod types;
 
 use scenarios::Scenario;
-use types::{OTelLog, ResourceLog, ScopeLog, Resource};
+use types::{OTelLog, Resource, ResourceLog, ScopeLog};
 
 pub struct SimulationEngine {
     scenarios: Vec<Box<dyn Scenario>>,
@@ -30,7 +30,7 @@ impl SimulationEngine {
 
     pub fn tick(&mut self, delta_ns: u64) -> OTelLog {
         let mut all_logs = Vec::new();
-        
+
         for scenario in &mut self.scenarios {
             let logs = scenario.tick(self.current_time_ns, delta_ns);
             all_logs.extend(logs);
@@ -39,16 +39,12 @@ impl SimulationEngine {
         self.current_time_ns += delta_ns;
 
         OTelLog {
-            resourceLogs: vec![
-                ResourceLog {
-                    resource: Resource { attributes: vec![] },
-                    scopeLogs: vec![
-                        ScopeLog {
-                            logRecords: all_logs
-                        }
-                    ]
-                }
-            ]
+            resourceLogs: vec![ResourceLog {
+                resource: Resource { attributes: vec![] },
+                scopeLogs: vec![ScopeLog {
+                    logRecords: all_logs,
+                }],
+            }],
         }
     }
 

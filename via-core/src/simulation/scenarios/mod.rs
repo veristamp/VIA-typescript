@@ -1,6 +1,6 @@
-pub mod traffic;
 pub mod performance;
 pub mod security;
+pub mod traffic;
 
 use crate::simulation::types::LogRecord;
 

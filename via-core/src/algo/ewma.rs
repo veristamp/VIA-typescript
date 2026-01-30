@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EWMA {
     alpha: f64,
     mean: f64,
@@ -32,6 +35,10 @@ impl EWMA {
     }
 
     pub fn get_value(&self) -> f64 {
+        self.mean
+    }
+
+    pub fn value(&self) -> f64 {
         self.mean
     }
 

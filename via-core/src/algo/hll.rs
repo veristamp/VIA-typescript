@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HyperLogLog {
     registers: Vec<u8>,
     p: u8,
@@ -36,7 +38,7 @@ impl HyperLogLog {
         let idx = (hash >> (64 - self.p)) as usize;
         let w = hash << self.p; // Remaining bits
         let lz = (w.leading_zeros() as u8) + 1;
-        
+
         if lz > self.registers[idx] {
             self.registers[idx] = lz;
         }

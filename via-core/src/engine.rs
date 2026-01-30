@@ -1,8 +1,5 @@
 use crate::algo::{
-    ewma::EWMA, 
-    hll::HyperLogLog, 
-    holtwinters::HoltWinters,
-    histogram::FadingHistogram
+    ewma::EWMA, histogram::FadingHistogram, hll::HyperLogLog, holtwinters::HoltWinters,
 };
 
 // --- Core Abstractions ---
@@ -18,10 +15,10 @@ pub struct SignalContext {
 /// Result returned by a single detector
 #[derive(Debug, Clone)]
 pub struct DetectionResult {
-    pub score: f64,         // 0.0 (Normal) to 1.0 (Critical)
-    pub weight: f64,        // How much this detector matters (0.0 to 1.0)
-    pub signal_type: u8,    // 1=Volume, 2=Latency, 3=Cardinality, 4=Burst
-    pub expected: f64,      // Contextual expected value (for UI)
+    pub score: f64,      // 0.0 (Normal) to 1.0 (Critical)
+    pub weight: f64,     // How much this detector matters (0.0 to 1.0)
+    pub signal_type: u8, // 1=Volume, 2=Latency, 3=Cardinality, 4=Burst
+    pub expected: f64,   // Contextual expected value (for UI)
 }
 
 /// The Interface that all SOTA detectors must implement
@@ -52,7 +49,9 @@ impl VolumeDetector {
 }
 
 impl Detector for VolumeDetector {
-    fn name(&self) -> &str { "Volume/RPS" }
+    fn name(&self) -> &str {
+        "Volume/RPS"
+    }
 
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
         if self.last_timestamp == 0 {
@@ -64,12 +63,16 @@ impl Detector for VolumeDetector {
         // 1e9 ns = 1 sec
         let delta_ns = ctx.timestamp.saturating_sub(self.last_timestamp).max(1);
         let delta_sec = delta_ns as f64 / 1_000_000_000.0;
-        
+
         // Instant rate = 1 event / delta_sec
         // We smooth this because raw IAT is extremely noisy
-        let instant_rps = if delta_sec > 0.0 { 1.0 / delta_sec } else { 0.0 };
+        let instant_rps = if delta_sec > 0.0 {
+            1.0 / delta_sec
+        } else {
+            0.0
+        };
         let smoothed_rps = self.rate_estimator.update(instant_rps);
-        
+
         self.last_timestamp = ctx.timestamp;
 
         if ctx.is_warmup {
@@ -78,12 +81,12 @@ impl Detector for VolumeDetector {
         }
 
         let (predicted, deviation) = self.hw.update(smoothed_rps);
-        
+
         // Z-Score-like normalization
         // If deviation > 3x expected noise, we start flagging
         let threshold = predicted.max(10.0) * 0.2; // 20% tolerance or min 10 RPS
         let score = (deviation.abs() - threshold).max(0.0) / predicted.max(1.0);
-        
+
         // Sigmoid squash to 0.0-1.0
         let final_score = (score / 4.0).clamp(0.0, 1.0);
 
@@ -115,15 +118,17 @@ impl DistributionDetector {
 }
 
 impl Detector for DistributionDetector {
-    fn name(&self) -> &str { "Distribution/Value" }
+    fn name(&self) -> &str {
+        "Distribution/Value"
+    }
 
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
         let anomaly_likelihood = self.hist.update(ctx.value);
-        
+
         // likelihood is "Inverse Probability". High = Anomaly.
         // > 10.0 means < 10% probability
         // > 50.0 means < 2% probability
-        
+
         let score = if anomaly_likelihood > 20.0 {
             ((anomaly_likelihood - 20.0) / 80.0).clamp(0.0, 1.0)
         } else {
@@ -162,23 +167,29 @@ impl CardinalityDetector {
 }
 
 impl Detector for CardinalityDetector {
-    fn name(&self) -> &str { "Cardinality/Velocity" }
+    fn name(&self) -> &str {
+        "Cardinality/Velocity"
+    }
 
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
         self.hll.add_hash(ctx.unique_id_hash);
-        
+
         // Check growth
         let current_count = self.hll.count();
         let delta = current_count - self.last_count;
         self.last_count = current_count;
-        
+
         // Track the "Velocity" of new users
         let avg_velocity = self.velocity_ewma.update(delta);
-        
+
         // If we suddenly see 5x the normal rate of new users -> Anomaly
         // This is classic Credential Stuffing detection
-        let ratio = if avg_velocity > 0.1 { delta / avg_velocity } else { 0.0 };
-        
+        let ratio = if avg_velocity > 0.1 {
+            delta / avg_velocity
+        } else {
+            0.0
+        };
+
         let score = if ratio > 3.0 {
             ((ratio - 3.0) / 7.0).clamp(0.0, 1.0)
         } else {
@@ -186,7 +197,7 @@ impl Detector for CardinalityDetector {
         };
 
         if score > 0.0 {
-             Some(DetectionResult {
+            Some(DetectionResult {
                 score,
                 weight: 1.2, // Very High importance (Security threat)
                 signal_type: 3,
@@ -215,7 +226,9 @@ impl BurstDetector {
 }
 
 impl Detector for BurstDetector {
-    fn name(&self) -> &str { "Burst/IAT" }
+    fn name(&self) -> &str {
+        "Burst/IAT"
+    }
 
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
         if self.last_timestamp == 0 {
@@ -232,7 +245,7 @@ impl Detector for BurstDetector {
         // If current event arrived 10x faster than average -> Burst
         // Only valid if average is somewhat paced (> 10ms)
         if avg_iat > 10.0 && delta_ms < (avg_iat * 0.1) {
-             Some(DetectionResult {
+            Some(DetectionResult {
                 score: 0.5, // Bursts are often just noise, so lower confidence
                 weight: 0.5,
                 signal_type: 4,
@@ -264,13 +277,21 @@ pub struct AnomalyResult {
 
 impl AnomalyProfile {
     pub fn new(
-        hw_alpha: f64, hw_beta: f64, hw_gamma: f64, period: usize,
-        hist_bins: usize, min_val: f64, max_val: f64, hist_decay: f64
+        hw_alpha: f64,
+        hw_beta: f64,
+        hw_gamma: f64,
+        period: usize,
+        hist_bins: usize,
+        min_val: f64,
+        max_val: f64,
+        hist_decay: f64,
     ) -> Self {
         // Construct the SOTA pipeline
         let detectors: Vec<Box<dyn Detector>> = vec![
             Box::new(VolumeDetector::new(hw_alpha, hw_beta, hw_gamma, period)),
-            Box::new(DistributionDetector::new(hist_bins, min_val, max_val, hist_decay)),
+            Box::new(DistributionDetector::new(
+                hist_bins, min_val, max_val, hist_decay,
+            )),
             Box::new(CardinalityDetector::new()),
             Box::new(BurstDetector::new()),
         ];
@@ -288,9 +309,14 @@ impl AnomalyProfile {
     }
 
     // Zero-Allocation Hot Path
-    pub fn process_with_hash(&mut self, timestamp: u64, unique_id_hash: u64, value: f64) -> AnomalyResult {
+    pub fn process_with_hash(
+        &mut self,
+        timestamp: u64,
+        unique_id_hash: u64,
+        value: f64,
+    ) -> AnomalyResult {
         self.event_count += 1;
-        
+
         let ctx = SignalContext {
             timestamp,
             unique_id_hash,
@@ -308,11 +334,11 @@ impl AnomalyProfile {
             if let Some(res) = detector.update(&ctx) {
                 total_score += res.score * res.weight;
                 total_weight += res.weight;
-                
+
                 // Track the "Primary" reason (highest score wins logic for UI)
                 if res.score * res.weight > total_score - (res.score * res.weight) {
-                     max_signal_type = res.signal_type;
-                     primary_expected = res.expected;
+                    max_signal_type = res.signal_type;
+                    primary_expected = res.expected;
                 }
             }
         }
@@ -326,10 +352,21 @@ impl AnomalyProfile {
 
         // Thresholds
         let is_anomaly = final_score > 0.5;
-        let severity = if final_score > 0.8 { 3 } // High
-                       else if final_score > 0.6 { 2 } // Med
-                       else if is_anomaly { 1 } // Low
-                       else { 0 };
+        let severity = if final_score > 0.8 {
+            3
+        }
+        // High
+        else if final_score > 0.6 {
+            2
+        }
+        // Med
+        else if is_anomaly {
+            1
+        }
+        // Low
+        else {
+            0
+        };
 
         AnomalyResult {
             is_anomaly,
@@ -339,5 +376,23 @@ impl AnomalyProfile {
             expected: primary_expected,
             actual: value,
         }
+    }
+}
+
+// Trait implementations for backward compatibility and factory pattern
+use crate::engine_v2::AnomalyProfileTrait;
+
+impl AnomalyProfileTrait for AnomalyProfile {
+    fn process_with_hash(
+        &mut self,
+        timestamp: u64,
+        unique_id_hash: u64,
+        value: f64,
+    ) -> AnomalyResult {
+        self.process_with_hash(timestamp, unique_id_hash, value)
+    }
+
+    fn get_stats(&self) -> String {
+        format!("Legacy Profile: {} events processed", self.event_count)
     }
 }

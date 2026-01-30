@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[allow(non_snake_case)]
@@ -54,7 +54,9 @@ pub enum AnyValue {
 
 impl AnyValue {
     pub fn string(s: impl Into<String>) -> Self {
-        AnyValue::String { stringValue: s.into() }
+        AnyValue::String {
+            stringValue: s.into(),
+        }
     }
     pub fn int(i: i64) -> Self {
         AnyValue::Int { intValue: i }
