@@ -29,6 +29,10 @@ impl HyperLogLog {
 
     pub fn add(&mut self, value: &str) {
         let hash = xxh3::xxh3_64(value.as_bytes());
+        self.add_hash(hash);
+    }
+
+    pub fn add_hash(&mut self, hash: u64) {
         let idx = (hash >> (64 - self.p)) as usize;
         let w = hash << self.p; // Remaining bits
         let lz = (w.leading_zeros() as u8) + 1;

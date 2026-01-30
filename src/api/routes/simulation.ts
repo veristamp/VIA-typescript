@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { RustSimulationEngine } from "../../core/rust-bridge";
+import { RustSimulationEngine } from "../../rust-bridge";
 import { z } from "zod";
 
 const router = Router();

@@ -8,10 +8,10 @@ use crate::algo::{
 // --- Core Abstractions ---
 
 /// Context passed to every detector for every event
-pub struct SignalContext<'a> {
+pub struct SignalContext {
     pub timestamp: u64,
-    pub unique_id: &'a str,
-    pub value: f64, // e.g., Latency or Payload Size
+    pub unique_id_hash: u64, // CHANGED: Pre-hashed ID for zero-allocation
+    pub value: f64,
     pub is_warmup: bool,
 }
 
@@ -165,7 +165,7 @@ impl Detector for CardinalityDetector {
     fn name(&self) -> &str { "Cardinality/Velocity" }
 
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
-        self.hll.add(ctx.unique_id);
+        self.hll.add_hash(ctx.unique_id_hash);
         
         // Check growth
         let current_count = self.hll.count();
@@ -281,14 +281,21 @@ impl AnomalyProfile {
         }
     }
 
+    // Legacy/FFI compatibility
     pub fn process(&mut self, timestamp: u64, unique_id: &str, value: f64) -> AnomalyResult {
+        let hash = xxhash_rust::xxh3::xxh3_64(unique_id.as_bytes());
+        self.process_with_hash(timestamp, hash, value)
+    }
+
+    // Zero-Allocation Hot Path
+    pub fn process_with_hash(&mut self, timestamp: u64, unique_id_hash: u64, value: f64) -> AnomalyResult {
         self.event_count += 1;
         
         let ctx = SignalContext {
             timestamp,
-            unique_id,
+            unique_id_hash,
             value,
-            is_warmup: self.event_count < 50, // 50 event warmup
+            is_warmup: self.event_count < 50,
         };
 
         // Ensemble Voting

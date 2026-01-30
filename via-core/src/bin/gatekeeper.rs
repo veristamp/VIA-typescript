@@ -17,8 +17,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use via_core::engine::AnomalyProfile;
 
-// --- 1. Global Metrics (SOTA Thread-safe counters) ---
-// We use the default registry for compatibility with standard Prometheus macros
+// --- 1. Global Metrics ---
 pub static INGEST_TOTAL: Lazy<Counter> = Lazy::new(|| {
     let c = Counter::new("via_ingest_total", "Total events ingested").unwrap();
     prometheus::register(Box::new(c.clone())).unwrap();
@@ -48,19 +47,28 @@ pub static PROCESSING_LATENCY: Lazy<Histogram> = Lazy::new(|| {
 
 // --- 2. Data Types ---
 
+// External API Contract
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IngestEvent {
-    pub u: String, // User/Entity ID
-    pub v: f64,    // Value
-    pub t: u64,    // Timestamp
+    pub u: String, 
+    pub v: f64,    
+    pub t: u64,    
+}
+
+// Internal Hot-Path Contract (Zero Allocation)
+#[derive(Debug, Clone, Copy)]
+pub struct InternalEvent {
+    pub uid_hash: u64,
+    pub val: f64,
+    pub ts: u64,
 }
 
 #[derive(Clone)]
 struct AppState {
-    shard_txs: Arc<Vec<Sender<IngestEvent>>>,
+    shard_txs: Arc<Vec<Sender<InternalEvent>>>,
 }
 
-// --- 3. Custom SOTA SIMD-JSON Extractor ---
+// --- 3. Custom SIMD-JSON Extractor ---
 struct SimdJson<T>(T);
 
 impl<S, T> FromRequest<S> for SimdJson<T>
@@ -74,7 +82,6 @@ where
         let bytes = Bytes::from_request(req, state).await.map_err(|e| e.into_response())?;
         let mut bytes_vec = bytes.to_vec();
         
-        // SIMD-JSON parsing
         let val = simd_json::from_slice::<T>(&mut bytes_vec)
             .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid JSON").into_response())?;
             
@@ -86,13 +93,14 @@ where
 
 struct ShardWorker {
     id: usize,
-    rx: Receiver<IngestEvent>,
-    profiles: HashMap<String, Box<AnomalyProfile>>,
+    rx: Receiver<InternalEvent>,
+    // CHANGED: Key is u64 hash, not String. massive memory save.
+    profiles: HashMap<u64, Box<AnomalyProfile>>,
     persistence_tx: Sender<String>,
 }
 
 impl ShardWorker {
-    fn spawn(id: usize, rx: Receiver<IngestEvent>, p_tx: Sender<String>) -> thread::JoinHandle<()> {
+    fn spawn(id: usize, rx: Receiver<InternalEvent>, p_tx: Sender<String>) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name(format!("via-shard-{}", id))
             .spawn(move || {
@@ -114,32 +122,36 @@ impl ShardWorker {
         while let Ok(event) = self.rx.recv() {
             let timer = PROCESSING_LATENCY.start_timer();
             
-            let profile = self.profiles.entry(event.u.clone()).or_insert_with(|| {
+            let profile = self.profiles.entry(event.uid_hash).or_insert_with(|| {
                 Box::new(AnomalyProfile::new(
                     0.1, 0.05, 0.1, 60,
                     50, 0.0, 5000.0, 0.99
                 ))
             });
 
-            let result = profile.process(event.t, &event.u, event.v);
+            // Zero-copy processing
+            let result = profile.process_with_hash(event.ts, event.uid_hash, event.val);
 
             if result.is_anomaly {
                 ANOMALY_TOTAL.inc();
                 
                 let signal = format!(
-                    "{{\"t\":{},\"u\":\"{}\",\"score\":{:.4},\"severity\":{},\"type\":{}}}
+                    "{{\"t\":{},\"h\":{},\"score\":{:.4},\"sev\":{},\"type\":{}}}
 ",
-                    event.t, event.u, result.anomaly_score, result.severity, result.signal_type
+                    event.ts, event.uid_hash, result.anomaly_score, result.severity, result.signal_type
                 );
                 
                 let _ = self.persistence_tx.try_send(signal);
                 
-                warn!(
-                    shard = self.id,
-                    user = event.u,
-                    score = result.anomaly_score,
-                    "ANOMALY"
-                );
+                // Warn is expensive, sample it in real prod
+                if result.severity > 2 {
+                    warn!(
+                        shard = self.id,
+                        hash = event.uid_hash,
+                        score = result.anomaly_score,
+                        "CRITICAL ANOMALY"
+                    );
+                }
             }
             
             timer.observe_duration();
@@ -157,7 +169,7 @@ impl PersistenceManager {
             .name("via-persistence".into())
             .spawn(move || {
                 let mut current_hour = chrono::Local::now().format("%Y%m%d%H").to_string();
-                let mut file = std::fs::OpenOptions::new()
+                let file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(format!("anomalies_{}.log", current_hour))
@@ -168,7 +180,6 @@ impl PersistenceManager {
                 info!("Persistence manager active.");
                 
                 while let Ok(msg) = rx.recv() {
-                    // Hourly Rotation
                     let now_hour = chrono::Local::now().format("%Y%m%d%H").to_string();
                     if now_hour != current_hour {
                         let _ = buffer.flush();
@@ -184,7 +195,6 @@ impl PersistenceManager {
                     let _ = buffer.write_all(msg.as_bytes());
                 }
                 
-                // Final flush on shutdown
                 let _ = buffer.flush();
                 info!("Persistence manager stopped.");
             })
@@ -199,11 +209,48 @@ async fn ingest(
     SimdJson(event): SimdJson<IngestEvent>,
 ) -> StatusCode {
     INGEST_TOTAL.inc();
+    process_single_event(event, &state)
+}
+
+async fn ingest_batch(
+    State(state): State<AppState>,
+    SimdJson(events): SimdJson<Vec<IngestEvent>>,
+) -> StatusCode {
+    let count = events.len();
+    INGEST_TOTAL.inc_by(count as f64);
     
+    for event in events {
+        // Inlining the processing logic for batch efficiency
+        let hash = xxhash_rust::xxh3::xxh3_64(event.u.as_bytes());
+        let shard_id = (hash as usize) % state.shard_txs.len();
+
+        let internal = InternalEvent {
+            uid_hash: hash,
+            val: event.v,
+            ts: event.t,
+        };
+
+        if let Err(_) = state.shard_txs[shard_id].try_send(internal) {
+            DROPPED_TOTAL.inc();
+        }
+    }
+    
+    StatusCode::ACCEPTED
+}
+
+// Helper to keep DRY (though we inline in batch for speed)
+#[inline(always)]
+fn process_single_event(event: IngestEvent, state: &AppState) -> StatusCode {
     let hash = xxhash_rust::xxh3::xxh3_64(event.u.as_bytes());
     let shard_id = (hash as usize) % state.shard_txs.len();
 
-    match state.shard_txs[shard_id].try_send(event) {
+    let internal = InternalEvent {
+        uid_hash: hash,
+        val: event.v,
+        ts: event.t,
+    };
+
+    match state.shard_txs[shard_id].try_send(internal) {
         Ok(_) => StatusCode::ACCEPTED,
         Err(_) => {
             DROPPED_TOTAL.inc();
@@ -226,9 +273,9 @@ async fn metrics_handler() -> String {
 async fn main() {
     tracing_subscriber::fmt::init();
     
-    info!("🚀 Initializing VIA Gatekeeper v2 (SOTA Edition)");
+    info!("🚀 Initializing VIA Gatekeeper v2 (SOTA Zero-Copy Edition)");
 
-    // Initialize metrics early to avoid race conditions in Lazy
+    // Initialize metrics
     let _ = &*INGEST_TOTAL;
     let _ = &*ANOMALY_TOTAL;
     let _ = &*DROPPED_TOTAL;
@@ -244,12 +291,11 @@ async fn main() {
     let mut worker_handles = Vec::new();
 
     for i in 0..shard_count {
-        let (tx, rx) = bounded::<IngestEvent>(100_000);
+        let (tx, rx) = bounded::<InternalEvent>(100_000);
         txs.push(tx);
         worker_handles.push(ShardWorker::spawn(i, rx, p_tx.clone()));
     }
 
-    // Drop p_tx in main so only workers hold it.
     drop(p_tx); 
 
     let state = AppState {
@@ -258,6 +304,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/ingest", post(ingest))
+        .route("/ingest/batch", post(ingest_batch))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(|| async { "OK" }))
         .with_state(state.clone());
@@ -277,19 +324,14 @@ async fn main() {
         .await
         .expect("Server crash");
 
-    // 1. Drop Ingest Senders (State)
-    // This closes the input side of the shard channels.
     drop(state);
     info!("Ingest channels closed.");
 
-    // 2. Wait for Shard Workers to Drain
     for handle in worker_handles {
         handle.join().expect("Shard worker panicked");
     }
     info!("All shards drained and stopped.");
 
-    // 3. Wait for Persistence to Drain
-    // (Happens automatically because workers dropped their p_tx clones)
     persistence_handle.join().expect("Persistence panicked");
     info!("Persistence flushed. Goodbye.");
 }
