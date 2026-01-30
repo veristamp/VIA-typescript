@@ -29,8 +29,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # IntelliJ based IDEs
 .idea
-
+target
 # Finder (MacOS) folder config
 .DS_Store
 bun.lock
+cargo.Lock
 qdrant_data

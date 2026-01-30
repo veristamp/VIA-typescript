@@ -45,15 +45,18 @@ export class HyperLogLog {
 	}
 
 	private countLeadingZeros(value: bigint): number {
-		if (value === 0n) return 64 - this.p; // Should be the remaining width
-		let count = 0;
-		let v = value;
-		// Check top bit (bit 63)
-		while ((v & 0x8000000000000000n) === 0n) {
-			count++;
-			v <<= 1n;
+		if (value === 0n) return 64 - this.p;
+
+		// Split 64-bit BigInt into two 32-bit numbers for fast CLZ
+		// We mask to ensure we treat them as unsigned 32-bit integers
+		const high = Number((value >> 32n) & 0xffffffffn);
+		const low = Number(value & 0xffffffffn);
+
+		if (high !== 0) {
+			return Math.clz32(high);
+		} else {
+			return 32 + Math.clz32(low);
 		}
-		return count;
 	}
 
 	count(): number {

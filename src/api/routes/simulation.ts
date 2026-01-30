@@ -1,41 +1,74 @@
-import { Hono } from "hono";
-import type { Simulator } from "../../simulation/simulator";
+import { Router } from "express";
+import { RustSimulationEngine } from "../../core/rust-bridge";
+import { z } from "zod";
 
-const app = new Hono();
+const router = Router();
+const simulation = new RustSimulationEngine();
 
-// Type definitions for Hono context
-declare module "hono" {
-	interface ContextVariableMap {
-		simulator: Simulator;
-	}
-}
+// Start with some baseline traffic
+simulation.addNormalTraffic(50.0);
 
-app.get("/scenarios", (c) => {
-	const simulator = c.get("simulator");
-	return c.json({ scenarios: simulator.listScenarios() });
+const ScenarioSchema = z.object({
+  type: z.enum([
+    "normal", 
+    "memory_leak", 
+    "cpu_spike", 
+    "credential_stuffing", 
+    "sql_injection", 
+    "port_scan"
+  ]),
+  intensity: z.number().positive(),
 });
 
-app.post("/scenarios/:name/start", (c) => {
-	const simulator = c.get("simulator");
-	const name = c.req.param("name");
-
-	try {
-		simulator.startScenario(name);
-		return c.json({ status: "started", scenario: name });
-	} catch (error) {
-		return c.json({ error: (error as Error).message }, 400);
-	}
+// GET /simulation/state
+// Returns the latest batch of logs from the simulation
+router.get("/tick", (req, res) => {
+    // 100ms tick
+    const logs = simulation.tick(100_000_000); 
+    res.setHeader("Content-Type", "application/json");
+    res.send(logs);
 });
 
-app.post("/scenarios/stop", (c) => {
-	const simulator = c.get("simulator");
-	simulator.stopScenario();
-	return c.json({ status: "stopped" });
+// POST /simulation/scenario
+// Adds a new scenario to the running simulation
+router.post("/scenario", (req, res) => {
+    const result = ScenarioSchema.safeParse(req.body);
+    if (!result.success) {
+        return res.status(400).json(result.error);
+    }
+
+    const { type, intensity } = result.data;
+
+    switch (type) {
+        case "normal":
+            simulation.addNormalTraffic(intensity);
+            break;
+        case "memory_leak":
+            simulation.addMemoryLeak(intensity);
+            break;
+        case "cpu_spike":
+            simulation.addCpuSpike(intensity); // 0.0 - 1.0
+            break;
+        case "credential_stuffing":
+            simulation.addCredentialStuffing(intensity);
+            break;
+        case "sql_injection":
+            simulation.addSqlInjection(intensity);
+            break;
+        case "port_scan":
+            simulation.addPortScan(intensity);
+            break;
+    }
+
+    res.json({ message: `Scenario ${type} added with intensity ${intensity}` });
 });
 
-app.get("/status", (c) => {
-	const simulator = c.get("simulator");
-	return c.json(simulator.getStatus());
+// POST /simulation/reset
+router.post("/reset", (req, res) => {
+    simulation.reset();
+    // Re-add baseline
+    simulation.addNormalTraffic(50.0);
+    res.json({ message: "Simulation reset to baseline" });
 });
 
-export const simulationRoutes = app;
+export default router;
