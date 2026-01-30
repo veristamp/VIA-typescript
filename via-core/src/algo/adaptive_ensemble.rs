@@ -93,6 +93,7 @@ impl DetectorPerformance {
     }
 
     /// Calculate recent score variance (confidence proxy)
+    #[allow(dead_code)]
     fn score_variance(&self) -> f64 {
         if self.recent_scores.len() < 2 {
             return 1.0; // High variance = low confidence initially

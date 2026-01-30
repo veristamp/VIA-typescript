@@ -3,12 +3,9 @@ use std::os::raw::{c_char, c_double, c_ulonglong};
 
 pub mod algo;
 pub mod engine;
-pub mod engine_v2;
 pub mod simulation;
-pub mod tier2_ffi;
 
 use engine::{AnomalyProfile, AnomalyResult};
-use engine_v2::{AnomalyProfileV2, AnomalyResultV2};
 use simulation::{
     scenarios::{
         performance::{CpuSpike, MemoryLeak},
@@ -65,12 +62,22 @@ pub extern "C" fn process_event(
         Err(_) => return,
     };
 
+    let hash = xxhash_rust::xxh3::xxh3_64(str_slice.as_bytes());
     let profile = unsafe { &mut *ptr };
-    let result = profile.process(timestamp, str_slice, value);
+    let result = profile.process_with_hash(timestamp, hash, value);
 
     unsafe {
         *out_result = result;
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_profile(ptr: *mut AnomalyProfile) {
+    if ptr.is_null() {
+        return;
+    }
+    let profile = unsafe { &mut *ptr };
+    profile.reset();
 }
 
 // --- Simulation FFI ---
@@ -179,33 +186,17 @@ pub extern "C" fn free_string(s: *mut c_char) {
     }
 }
 
-// --- Enhanced Anomaly Profile V2 FFI ---
+// --- Live Detection Simulation FFI ---
+
+use simulation::LiveDetectionEngine;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn create_profile_v2(
-    hw_alpha: c_double,
-    hw_beta: c_double,
-    hw_gamma: c_double,
-    period: usize,
-    hist_bins: usize,
-    min_val: c_double,
-    max_val: c_double,
-    hist_decay: c_double,
-) -> *mut AnomalyProfileV2 {
-    let profile = AnomalyProfileV2::new(
-        hw_alpha, hw_beta, hw_gamma, period, hist_bins, min_val, max_val, hist_decay,
-    );
-    Box::into_raw(Box::new(profile))
+pub extern "C" fn live_detection_create() -> *mut LiveDetectionEngine {
+    Box::into_raw(Box::new(LiveDetectionEngine::new()))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn create_profile_v2_default() -> *mut AnomalyProfileV2 {
-    let profile = AnomalyProfileV2::default();
-    Box::into_raw(Box::new(profile))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn free_profile_v2(ptr: *mut AnomalyProfileV2) {
+pub extern "C" fn live_detection_free(ptr: *mut LiveDetectionEngine) {
     if ptr.is_null() {
         return;
     }
@@ -215,37 +206,118 @@ pub extern "C" fn free_profile_v2(ptr: *mut AnomalyProfileV2) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn process_event_v2(
-    ptr: *mut AnomalyProfileV2,
-    timestamp: c_ulonglong,
-    unique_id: *const c_char,
-    value: c_double,
-    out_result: *mut AnomalyResultV2,
+pub extern "C" fn live_detection_start(
+    ptr: *mut LiveDetectionEngine,
+    scenario: *const c_char,
+    intensity: c_double,
 ) {
-    if ptr.is_null() || unique_id.is_null() || out_result.is_null() {
+    if ptr.is_null() || scenario.is_null() {
         return;
     }
-
-    let c_str = unsafe { CStr::from_ptr(unique_id) };
-    let str_slice = match c_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let hash = xxhash_rust::xxh3::xxh3_64(str_slice.as_bytes());
-    let profile = unsafe { &mut *ptr };
-    let result = profile.process_with_hash(timestamp, hash, value);
-
-    unsafe {
-        *out_result = result;
+    let engine = unsafe { &mut *ptr };
+    let c_str = unsafe { CStr::from_ptr(scenario) };
+    if let Ok(scenario_name) = c_str.to_str() {
+        engine.start(scenario_name, intensity);
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn reset_profile_v2(ptr: *mut AnomalyProfileV2) {
+pub extern "C" fn live_detection_stop(ptr: *mut LiveDetectionEngine) {
     if ptr.is_null() {
         return;
     }
-    let profile = unsafe { &mut *ptr };
-    profile.reset();
+    let engine = unsafe { &mut *ptr };
+    engine.stop();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_pause(ptr: *mut LiveDetectionEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let engine = unsafe { &mut *ptr };
+    engine.pause();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_resume(ptr: *mut LiveDetectionEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let engine = unsafe { &mut *ptr };
+    engine.resume();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_set_rate(ptr: *mut LiveDetectionEngine, rate: c_double) {
+    if ptr.is_null() {
+        return;
+    }
+    let engine = unsafe { &mut *ptr };
+    engine.set_rate(rate);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_tick(
+    ptr: *mut LiveDetectionEngine,
+    delta_ns: c_ulonglong,
+) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &mut *ptr };
+    let json = engine.tick_json(delta_ns);
+    CString::new(json).unwrap().into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_status(ptr: *mut LiveDetectionEngine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &mut *ptr };
+    let json = engine.status_json();
+    CString::new(json).unwrap().into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_dashboard(ptr: *mut LiveDetectionEngine) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let engine = unsafe { &mut *ptr };
+    let json = engine.dashboard_json();
+    CString::new(json).unwrap().into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_inject_anomaly(
+    ptr: *mut LiveDetectionEngine,
+    anomaly_type: *const c_char,
+    duration_ms: c_ulonglong,
+) {
+    if ptr.is_null() || anomaly_type.is_null() {
+        return;
+    }
+    let engine = unsafe { &mut *ptr };
+    let c_str = unsafe { CStr::from_ptr(anomaly_type) };
+    if let Ok(anomaly) = c_str.to_str() {
+        engine.inject_anomaly(anomaly, duration_ms);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_reset_detectors(ptr: *mut LiveDetectionEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let engine = unsafe { &mut *ptr };
+    engine.reset_detectors();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn live_detection_get_scenarios() -> *mut c_char {
+    let scenarios = simulation::get_available_scenarios();
+    let json = serde_json::to_string(&scenarios).unwrap_or_else(|_| "[]".to_string());
+    CString::new(json).unwrap().into_raw()
 }

@@ -1,5 +1,10 @@
+pub mod live_engine;
+pub mod live_types;
 pub mod scenarios;
 pub mod types;
+
+pub use live_engine::LiveDetectionEngine;
+pub use live_types::get_available_scenarios;
 
 use scenarios::Scenario;
 use types::{OTelLog, Resource, ResourceLog, ScopeLog};
