@@ -64,7 +64,7 @@ impl Scenario for NormalTraffic {
     fn name(&self) -> &str { "Normal Traffic" }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         
         // Add some jitter to the volume (Poisson-like)
@@ -82,14 +82,14 @@ impl Scenario for NormalTraffic {
             let latency_dist = LogNormal::new(4.0, 0.5).unwrap(); // ~55ms mean, but with tail
             let latency = latency_dist.sample(&mut rng) as i64;
 
-            let status_code = if rng.gen_bool(0.99) { 200 } else { 500 };
+            let status_code = if rng.random_bool(0.99) { 200 } else { 500 };
             let level = if status_code == 200 { "INFO" } else { "ERROR" };
 
             let mut attrs = vec![
                 KeyValue { key: "http.method".to_string(), value: AnyValue::string("GET") },
                 KeyValue { key: "http.status_code".to_string(), value: AnyValue::int(status_code) },
                 KeyValue { key: "http.duration_ms".to_string(), value: AnyValue::int(latency) },
-                KeyValue { key: "net.peer.ip".to_string(), value: AnyValue::string(format!("10.0.{}.{}", rng.gen_range(0..255), rng.gen_range(0..255))) },
+                KeyValue { key: "net.peer.ip".to_string(), value: AnyValue::string(format!("10.0.{}.{}", rng.random_range(0..255), rng.random_range(0..255))) },
             ];
 
             if status_code == 500 {

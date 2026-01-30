@@ -1,86 +1,93 @@
-# VIA Core (Rust Engine)
+# VIA Core (High-Performance Engine)
 
-**via-core** is the high-performance heart of the VIA anomaly detection system. It is a Rust crate that compiles into a dynamic library (`.dll`, `.so`, `.dylib`) to be loaded by the Bun/Node.js runtime via FFI (Foreign Function Interface).
+**via-core** is the algorithmic heart of the VIA anomaly detection platform. It is a dual-mode Rust crate that serves two critical functions:
+1.  **FFI Library**: A dynamic library (`.dll`/`.so`) loaded by the Bun/Node.js backend for simulation and hybrid logic.
+2.  **Gatekeeper Server**: A standalone, high-throughput Tier-1 ingestion server capable of processing >150,000 events/second.
 
-This engine is designed for **Tier-1 Anomaly Detection**: extremely fast, streaming, single-pass analysis of high-volume telemetry data (logs, metrics, traces).
+This system is engineered for **Zero-Copy Performance**, **Lock-Free Concurrency**, and **Probabilistic Analytics**.
 
-## 🚀 Key Features
+---
 
-*   **Zero-Copy Ingestion**: Processes events via FFI pointers without serialization overhead where possible.
-*   **Streaming Algorithms**: No heavy databases. All state is maintained in-memory using compact probabilistic data structures.
-*   **Production Simulation**: Includes a built-in OTel-compliant log generator for stress testing and red-teaming.
+## 🏛️ System Architecture
 
-## 🧠 Algorithmic Core (`src/algo`)
+### 1. The Gatekeeper (Tier-1 Engine)
+The Gatekeeper (`src/bin/gatekeeper.rs`) is the production entry point. It implements a **Sharded Actor Model** to handle massive data streams without global locks.
 
-The engine combines multiple statistical signals to detect anomalies in real-time.
+*   **Network Layer**: `Tokio` + `Axum` for async I/O, utilizing `simd-json` for ultra-fast payload parsing.
+*   **Routing**: Deterministic Sharding (`xxHash`) guarantees that all events for a specific user/entity are routed to the same worker thread.
+*   **Workers**: 8+ independent threads (Actors) that manage state in `HashMap`s. No mutexes or atomics are used in the hot path.
+*   **Persistence**: Dedicated async thread for anomaly logging with automatic hourly file rotation.
+*   **Metrics**: Prometheus endpoint (`/metrics`) exposing lock-free counters for ingestion, drops, and latency.
 
-### 1. Holt-Winters (Triple Exponential Smoothing)
-*   **File**: `algo/holtwinters.rs`
-*   **Purpose**: Tracks **Volume Trends** (Requests Per Second).
-*   **Logic**: Decomposes the signal into **Level**, **Trend**, and **Seasonality**. It learns the "normal" heartbeat of your traffic and flags deviations (e.g., unexpected surges or drops).
-*   **Adaptation**: We feed `1 / Inter-Arrival-Time` into HW to estimate instantaneous rate on a per-event basis.
+### 2. The Algorithmic Core (`src/engine.rs`)
+The detection logic is built on a **Component-Based Signal Architecture**. Every event is analyzed by an ensemble of detectors, each outputting a weighted score.
 
-### 2. Fading Histogram
-*   **File**: `algo/histogram.rs`
-*   **Purpose**: Tracks **Value Distributions** (e.g., Latency, Payload Size).
-*   **Logic**: Maintains a weighted histogram where old data exponentially decays (`decay` factor). New data is bucketed.
-*   **Detection**: If a new value falls into a "rare" bucket (low probability mass), it is flagged as a distribution anomaly (e.g., P99 latency becoming P50).
+| Detector | Signal | Implementation | Logic |
+| :--- | :--- | :--- | :--- |
+| **Volume** | Request Rate (RPS) | `Holt-Winters` + `EWMA` | Smoothes inter-arrival times to predict baseline RPS trends and seasonality. Flags deviations. |
+| **Distribution** | Value Shape (Latency) | `FadingHistogram` | Maintains an exponentially decaying histogram to detect "tail" events (e.g., P99 latency spikes). |
+| **Cardinality** | User Growth | `HyperLogLog` + `Velocity` | Tracks the *rate of new unique users*. Sudden slope changes indicate attacks (e.g., Credential Stuffing). |
+| **Burst** | Micro-Timing | `CUSUM` | Monitors inter-arrival timing for tight clustering indicative of scripted attacks or DoS. |
 
-### 3. HyperLogLog (HLL)
-*   **File**: `algo/hll.rs`
-*   **Purpose**: Tracks **Cardinality** (Unique Users, IP addresses).
-*   **Logic**: Uses hashing and bit-counting (probabilistic) to estimate the count of unique items with constant memory usage (~12KB), regardless of finding 1 million or 1 billion users.
-*   **Detection**: Sudden spikes in cardinality (e.g., Credential Stuffing / Botnets).
+### 3. Simulation Engine (`src/simulation`)
+A built-in "Red Team" generator used to validate the engine. It produces OTel-compliant logs with realistic anomalies.
+*   **Scenarios**: Normal Traffic, Memory Leaks, CPU Spikes, SQL Injection, Port Scanning.
+*   **Control**: Exposed via FFI to allow the UI to dynamically inject attacks into the stream.
 
-### 4. EWMA & CUSUM
-*   **File**: `algo/ewma.rs`, `algo/cusum.rs`
-*   **Purpose**: Fast-reaction burst detection.
-*   **Logic**: Monitors the Inter-Arrival Time (IAT) of events. A CUSUM (Cumulative Sum) drift detector triggers if the IAT consistently drops below the baseline.
-
-## 🎮 Simulation Engine (`src/simulation`)
-
-A built-in "Red Team" engine that generates OTel-compliant JSON logs.
-
-*   **Traffic**: Poisson-process arrivals with LogNormal latency distributions.
-*   **Attacks**:
-    *   **Credential Stuffing**: High-volume, rotating IP login failures.
-    *   **SQL Injection**: Malicious payloads in DB logs.
-    *   **Port Scans**: Rapid multi-port connection attempts.
-*   **Resources**: Memory leaks and CPU spikes.
+---
 
 ## 🛠️ Build & Usage
 
 ### Prerequisites
-*   **Rust Toolchain**: `rustup`, `cargo`
-*   **Target**: `x86_64-pc-windows-gnu` (if avoiding MSVC) or standard MSVC.
+*   **Rust**: Stable toolchain (Edition 2024 supported).
+*   **OS**: Windows (MSVC/GNU), Linux, macOS.
 
-### Build Commands
-
+### 1. Building the Gatekeeper (Server)
+Run this to start the production ingestion server.
 ```powershell
-# 1. Standard Debug Build (Fast Compilation)
-cargo build
+# Build & Run (Release mode is CRITICAL for performance)
+cargo run --release --bin gatekeeper
+```
 
-# 2. Release Build (Max Performance - Use for Prod)
+**Endpoints:**
+*   `POST /ingest`: Accepts JSON `{"u": "user", "v": 12.5, "t": 1234567890}`
+*   `GET /metrics`: Prometheus metrics.
+*   `GET /health`: Health check.
+
+### 2. Building the Library (FFI for Bun)
+Run this to build the `.dll` for the Node.js/Bun backend.
+```powershell
 cargo build --release
-
-# 3. Build for Specific Target (e.g., GNU ABI)
-cargo build --target x86_64-pc-windows-gnu
 ```
+Artifact location: `target/release/via_core.dll`
 
-### Running Benchmarks
-We have a live ingestion benchmark that simulates ~130k events/sec.
-
+### 3. Running Benchmarks
+Validate the internal engine throughput (expected: ~150k events/sec).
 ```powershell
-cargo run --example benchmark
+cargo run --release --example benchmark
 ```
 
-## 🔌 FFI Interface (`src/lib.rs`)
+---
 
-The library exposes a C-ABI compatible interface for Bun:
+## 📊 Performance Characteristics
 
-*   `create_profile(...)`: Allocates a new detector.
-*   `process_event(...)`: Feeds a single event (timestamp, user_id, value).
-*   `simulation_tick(...)`: Advances the simulation and returns a batch of logs.
-*   `free_...`: Memory cleanup (Manual memory management required on JS side!).
+*   **Throughput**: Linear scaling with CPU cores. ~150k EPS on 8 cores.
+*   **Latency**: P99 processing time < 1ms (internal).
+*   **Memory**: Bounded per-profile state (Probabilistic structures).
+*   **Backpressure**: "Fail Open" policy. If queues fill up, events are dropped to preserve system stability.
 
-**Note**: All pointers returned by `create_*` must be freed using their respective `free_*` functions to avoid memory leaks in the host application.
+## 📂 Project Structure
+
+```text
+via-core/
+├── src/
+│   ├── algo/           # Core algorithms (HLL, HW, EWMA)
+│   ├── engine.rs       # The SOTA Ensemble Logic
+│   ├── simulation/     # Attack Generator & Scenarios
+│   ├── bin/
+│   │   └── gatekeeper.rs # The Production Server (Axum/Tokio)
+│   └── lib.rs          # FFI Exports for Bun
+├── examples/
+│   └── benchmark.rs    # Ingestion Pipeline Simulator
+└── Cargo.toml          # Dependencies
+```

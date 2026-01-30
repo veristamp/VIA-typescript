@@ -13,7 +13,7 @@ impl Scenario for CredentialStuffing {
     fn name(&self) -> &str { "Credential Stuffing" }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.attack_rps * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -24,7 +24,7 @@ impl Scenario for CredentialStuffing {
             let trace_id = Uuid::new_v4().simple().to_string();
             let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
             let user_id = format!("user_{}_{}", current_time_ns, i); // Synthetic distinct users
-            let is_success = rng.gen_bool(0.01); // 1% accidental success in stuffing
+            let is_success = rng.random_bool(0.01); // 1% accidental success in stuffing
 
             let (level, msg, code) = if is_success {
                 ("WARN", "Suspicious login from new location", 200)
@@ -34,8 +34,8 @@ impl Scenario for CredentialStuffing {
 
             // Actually stuffing usually comes from many IPs.
             // Let's sim a rotating proxy:
-            let ip_octet = rng.gen_range(1..255);
-            let bot_ip = format!("{}.{}.{}.{}", rng.gen_range(10..200), rng.gen_range(0..255), rng.gen_range(0..255), ip_octet);
+            let ip_octet = rng.random_range(1..255);
+            let bot_ip = format!("{}.{}.{}.{}", rng.random_range(10..200), rng.random_range(0..255), rng.random_range(0..255), ip_octet);
 
             logs.push(create_log(
                 level,
@@ -65,7 +65,7 @@ impl Scenario for SqlInjection {
     fn name(&self) -> &str { "SQL Injection Probe" }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.attack_rps * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -110,7 +110,7 @@ impl Scenario for PortScan {
     fn name(&self) -> &str { "Port Scan" }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-         let mut rng = rand::thread_rng();
+         let mut rng = rand::rng();
          let seconds = delta_ns as f64 / 1_000_000_000.0;
          let count = (self.scan_speed * seconds).round() as u64;
          let mut logs = Vec::new();

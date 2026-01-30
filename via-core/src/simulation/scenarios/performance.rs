@@ -48,11 +48,11 @@ impl Scenario for MemoryLeak {
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         self.current_memory_mb += self.leak_rate_mb_per_sec * seconds;
         
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut logs = Vec::new();
 
         // Generate metric-like logs every second (probabilistically)
-        if rng.gen_bool(0.2) { // not every tick, but frequent
+        if rng.random_bool(0.2) { // not every tick, but frequent
              let trace_id = Uuid::new_v4().simple().to_string();
              let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
              
@@ -109,11 +109,11 @@ impl Scenario for CpuSpike {
     fn name(&self) -> &str { "CPU Spike" }
 
     fn tick(&mut self, current_time_ns: u64, _delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut logs = Vec::new();
 
         // If intensity is high, we generate logs indicating slow processing or thread locking
-        if rng.gen_bool(self.intensity) {
+        if rng.random_bool(self.intensity) {
              let trace_id = Uuid::new_v4().simple().to_string();
              let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
              
@@ -146,9 +146,9 @@ impl Scenario for InfiniteLoop {
     fn name(&self) -> &str { "Infinite Loop" }
 
     fn tick(&mut self, current_time_ns: u64, _delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         // Rare but catastrophic event
-        if rng.gen_bool(0.05) { 
+        if rng.random_bool(0.05) { 
             let trace_id = Uuid::new_v4().simple().to_string();
              let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
             
