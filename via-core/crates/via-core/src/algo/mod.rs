@@ -1,7 +1,6 @@
 pub mod adaptive_ensemble;
 pub mod adaptive_threshold;
 pub mod behavioral_fingerprint;
-pub mod cusum;
 pub mod drift_detector;
 pub mod enhanced_cusum;
 pub mod ewma;
@@ -17,6 +16,7 @@ pub use adaptive_ensemble::{AdaptiveEnsemble, DetectorOutput};
 pub use adaptive_threshold::{AdaptiveThreshold, ThresholdMethod};
 pub use behavioral_fingerprint::{BehavioralFingerprintDetector, ProfileStore};
 pub use drift_detector::{DriftType, EnsembleDriftDetector};
-pub use enhanced_cusum::{EnhancedCUSUM, CUSUM};
+pub use enhanced_cusum::{CUSUM, EnhancedCUSUM};
 pub use multi_scale::MultiScaleDetector;
 pub use rrcf::{RRCFDetector, StreamingRRCF};
+pub use spectral_residual::SpectralResidual;

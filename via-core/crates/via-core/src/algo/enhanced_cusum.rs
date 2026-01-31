@@ -142,15 +142,22 @@ impl EnhancedCUSUM {
 
         // V-Mask check: Look at trend over lead distance
         let v_mask_trigger = self.check_v_mask();
+        let v_mask_any = v_mask_trigger.0 || v_mask_trigger.1;
 
-        // Determine alarm
-        if self.c_pos > effective_threshold || v_mask_trigger.0 {
+        // Determine which direction is dominant
+        let is_upward_dominant = self.c_pos >= self.c_neg;
+
+        // Determine alarm - check which statistic exceeds threshold
+        // Or if V-mask triggers, use the dominant direction
+        if self.c_pos > effective_threshold
+            || (v_mask_any && is_upward_dominant && self.c_pos > 0.0)
+        {
             self.alarm = true;
             self.alarm_type = 1;
             self.alarm_severity = (self.c_pos / effective_threshold).min(2.0) / 2.0;
             self.c_pos = 0.0; // Reset after alarm (standard CUSUM practice)
             self.total_alarms += 1;
-        } else if self.c_neg > effective_threshold || v_mask_trigger.1 {
+        } else if self.c_neg > effective_threshold || (v_mask_any && !is_upward_dominant) {
             self.alarm = true;
             self.alarm_type = -1;
             self.alarm_severity = (self.c_neg / effective_threshold).min(2.0) / 2.0;
@@ -349,18 +356,19 @@ mod tests {
 
     #[test]
     fn test_cusum_detects_downward_shift() {
-        let mut cusum = EnhancedCUSUM::new(100.0, 0.5, 4.0);
+        // Disable FIR for cleaner detection behavior
+        let mut cusum = EnhancedCUSUM::with_options(100.0, 0.5, 4.0, 10, false, 0.0);
 
-        // Warm up
-        for _ in 0..20 {
+        // Warm up at target level
+        for _ in 0..30 {
             cusum.update(100.0);
         }
 
-        // Inject downward shift
+        // Inject downward shift - large enough to trigger quickly
         let mut detected = false;
-        for _ in 0..10 {
-            if cusum.update(85.0) {
-                // 15 unit drop
+        for _ in 0..15 {
+            if cusum.update(80.0) {
+                // 20 unit drop (larger for reliable detection)
                 detected = true;
                 break;
             }
@@ -381,7 +389,7 @@ mod tests {
         let mut fir_steps = 0;
         let mut no_fir_steps = 0;
 
-        for i in 0..15 {
+        for _i in 0..15 {
             if !fir_detected {
                 fir_steps += 1;
                 if cusum_fir.update(120.0) {

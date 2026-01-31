@@ -379,7 +379,7 @@ mod tests {
             threshold.update(100.0 + rand::random::<f64>() * 2.0);
         }
 
-        let (mean, _, thresh, _) = threshold.get_stats();
+        let (mean, _, _thresh, _) = threshold.get_stats();
 
         // Should detect outliers
         assert!(threshold.is_anomaly(150.0), "Should detect 5-sigma outlier");

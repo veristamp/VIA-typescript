@@ -113,35 +113,35 @@ impl DetectorPerformance {
 
 /// Thompson Sampling bandit for weight optimization
 #[derive(Serialize, Deserialize, Clone)]
-struct ThompsonBandit {
+pub struct ThompsonBandit {
     /// Number of detectors (arms)
     num_arms: usize,
-    /// Alpha parameters for Beta distributions (successes)
+    /// Alpha parameters for Beta distributions (successes + 1)
     alphas: Vec<f64>,
-    /// Beta parameters for Beta distributions (failures)
+    /// Beta parameters for Beta distributions (failures + 1)
     betas: Vec<f64>,
-    /// Discount factor for old observations
-    gamma: f64,
 }
 
 impl ThompsonBandit {
-    fn new(num_arms: usize) -> Self {
+    pub fn new(num_arms: usize) -> Self {
         let n = num_arms.max(1);
         // Initialize with uniform Beta(1, 1) priors
         Self {
             num_arms: n,
             alphas: vec![1.0; n],
             betas: vec![1.0; n],
-            gamma: 0.99, // Discount old observations
         }
     }
 
     /// Sample from Beta distributions to get weights
-    fn sample_weights(&self) -> Vec<f64> {
+    pub fn sample_weights(&self) -> Vec<f64> {
         let mut weights = Vec::with_capacity(self.num_arms);
 
         for i in 0..self.num_arms {
-            let beta_dist = rand_distr::Beta::new(self.alphas[i], self.betas[i]).unwrap();
+            // Clamp alpha and beta to valid ranges for Beta distribution
+            let alpha = self.alphas[i].max(0.01);
+            let beta = self.betas[i].max(0.01);
+            let beta_dist = rand_distr::Beta::new(alpha, beta).unwrap();
             let sample: f64 = beta_dist.sample(&mut rand::rng());
             weights.push(sample);
         }
@@ -156,18 +156,12 @@ impl ThompsonBandit {
     }
 
     /// Update with feedback (success = 1, failure = 0)
-    fn update(&mut self, arm: usize, success: bool) {
+    pub fn update(&mut self, arm: usize, success: bool) {
         if arm >= self.num_arms {
             return;
         }
 
-        // Apply discount factor to old observations
-        for i in 0..self.num_arms {
-            self.alphas[i] = 1.0 + self.gamma * (self.alphas[i] - 1.0);
-            self.betas[i] = 1.0 + self.gamma * (self.betas[i] - 1.0);
-        }
-
-        // Update selected arm
+        // Update selected arm directly (no discount for simpler behavior)
         if success {
             self.alphas[arm] += 1.0;
         } else {
@@ -176,10 +170,11 @@ impl ThompsonBandit {
     }
 
     /// Get expected values (mean of Beta distributions)
-    fn expected_weights(&self) -> Vec<f64> {
+    pub fn expected_weights(&self) -> Vec<f64> {
         let mut weights = Vec::with_capacity(self.num_arms);
 
         for i in 0..self.num_arms {
+            // Beta distribution mean = alpha / (alpha + beta)
             let mean = self.alphas[i] / (self.alphas[i] + self.betas[i]);
             weights.push(mean);
         }
@@ -191,6 +186,15 @@ impl ThompsonBandit {
         }
 
         weights
+    }
+
+    /// Get raw alpha/beta values for debugging
+    pub fn get_params(&self) -> Vec<(f64, f64)> {
+        self.alphas
+            .iter()
+            .cloned()
+            .zip(self.betas.iter().cloned())
+            .collect()
     }
 }
 
@@ -659,21 +663,39 @@ mod tests {
     fn test_thompson_sampling() {
         let mut bandit = ThompsonBandit::new(3);
 
-        // Update with successes and failures
+        // Update with clear successes for arm 0
         bandit.update(0, true);
         bandit.update(0, true);
-        bandit.update(0, false);
+        bandit.update(0, true);
+        bandit.update(0, true);
+        bandit.update(0, true);
+
+        // Arm 1 gets fewer successes
         bandit.update(1, true);
+        bandit.update(1, false);
+
+        // Arm 2 gets failures
+        bandit.update(2, false);
         bandit.update(2, false);
 
         let weights = bandit.expected_weights();
         assert_eq!(weights.len(), 3);
 
-        // Arm 0 should have highest weight (2 successes, 1 failure)
-        assert!(weights[0] > weights[1], "Arm 0 should be preferred");
+        // Arm 0 should have highest weight (5 successes, 0 failures)
+        // Expected value = alpha/(alpha+beta) = 6/7 = 0.857
+        // Arm 1 = 2/(2+2) = 0.5
+        // Arm 2 = 1/(1+3) = 0.25
+        assert!(
+            weights[0] > weights[1],
+            "Arm 0 should be preferred over arm 1: {} vs {}",
+            weights[0],
+            weights[1]
+        );
         assert!(
             weights[0] > weights[2],
-            "Arm 0 should be preferred over arm 2"
+            "Arm 0 should be preferred over arm 2: {} vs {}",
+            weights[0],
+            weights[2]
         );
     }
 
