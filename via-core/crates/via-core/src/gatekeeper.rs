@@ -71,15 +71,15 @@ struct AppState {
 // --- 3. Custom SIMD-JSON Extractor ---
 struct SimdJson<T>(T);
 
-impl<S, T> FromRequest<S> for SimdJson<T>
+impl<T, S> FromRequest<S> for SimdJson<T>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de> + Send,
     S: Send + Sync,
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let bytes = Bytes::from_request(req, state).await.map_err(|e| e.into_response())?;
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = Bytes::from_request(req, _state).await.map_err(|e| e.into_response())?;
         let mut bytes_vec = bytes.to_vec();
         
         let val = simd_json::from_slice::<T>(&mut bytes_vec)
@@ -202,7 +202,7 @@ impl PersistenceManager {
     }
 }
 
-// --- 6. Handlers ---
+// --- 7. Handlers ---
 
 async fn ingest(
     State(state): State<AppState>,

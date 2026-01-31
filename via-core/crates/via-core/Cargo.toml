@@ -1,0 +1,31 @@
+[package]
+name = "via-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "via_core"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "gatekeeper"
+path = "src/gatekeeper.rs"
+
+[dependencies]
+xxhash-rust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = "0.14"
+rand = { workspace = true }
+rand_distr = { workspace = true }
+axum = "0.8"
+axum-core = "0.5"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-channel = { workspace = true }
+once_cell = { workspace = true }
+prometheus = "0.13"
+chrono = { workspace = true }

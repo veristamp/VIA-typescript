@@ -3,11 +3,11 @@
 //! Real-time anomaly detection integrated with simulation for live visualization
 //! and interactive control.
 
-use crate::engine::{AnomalyProfile, AnomalyResult};
 use crate::simulation::live_types::*;
 use crate::simulation::scenarios::{performance::*, security::*, traffic::*, Scenario};
 use crate::simulation::types::LogRecord;
 use std::collections::{HashMap, VecDeque};
+use via_core::engine::{AnomalyProfile, AnomalyResult};
 
 /// Live detection engine that runs detectors on simulated events in real-time
 pub struct LiveDetectionEngine {
