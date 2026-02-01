@@ -292,14 +292,19 @@ impl Detector for CardinalityDetectorV2 {
 /// Burst Detector (Enhanced CUSUM)
 pub struct BurstDetectorV2 {
     cusum: EnhancedCUSUM,
+    iat_tracker: EWMA,
     last_timestamp: u64,
+    warmup_remaining: usize,
 }
 
 impl BurstDetectorV2 {
     pub fn new() -> Self {
         Self {
-            cusum: EnhancedCUSUM::with_options(50.0, 10.0, 4.0, 5, true, 0.5),
+            // Target 0.0 initially, will be updated dynamically
+            cusum: EnhancedCUSUM::with_options(0.0, 0.5, 4.0, 5, true, 0.5),
+            iat_tracker: EWMA::new(100.0), // Learn over last 100 samples
             last_timestamp: 0,
+            warmup_remaining: 50, // Wait for IAT to stabilize (shorter)
         }
     }
 }
@@ -329,27 +334,37 @@ impl Detector for BurstDetectorV2 {
         let delta_ms = delta_ns as f64 / 1_000_000.0;
         self.last_timestamp = ctx.timestamp;
 
-        let burst_indicator = 100.0 - delta_ms;
-        let alarm = self.cusum.update(burst_indicator);
+        // Learn the baseline IAT
+        let baseline_iat = self.iat_tracker.update(delta_ms);
+
+        if self.warmup_remaining > 0 {
+            self.warmup_remaining -= 1;
+            return None;
+        }
+
+        // The "Burst Indicator" is how much faster the current request is compared
+        // to the learned baseline.
+        // If baseline is 10ms and current is 1ms, shift is 9.0.
+        // We look for sudden *decreases* in IAT (clustering).
+        let burst_shift = (baseline_iat - delta_ms).max(0.0);
+
+        // Update CUSUM target to reflect current learned baseline variability
+        // We use 0.0 as target because we are feeding it "shifts from baseline"
+        self.cusum.set_target(0.0);
+        let alarm = self.cusum.update(burst_shift);
 
         if alarm {
             let severity = self.cusum.alarm_severity;
-            let alarm_type = self.cusum.alarm_type;
 
             Some(DetectionResult {
                 score: severity,
-                weight: 0.6,
+                weight: 0.8, // Increased weight since baseline is now dynamic/clean
                 signal_type: DetectorId::Burst as u8,
-                expected: 50.0,
+                expected: baseline_iat,
                 confidence: 0.75,
                 reason: format!(
-                    "Burst detected: IAT {:.1}ms (type: {})",
-                    delta_ms,
-                    if alarm_type > 0 {
-                        "clustering"
-                    } else {
-                        "dispersion"
-                    }
+                    "Burst detected: IAT {:.2}ms (baseline: {:.2}ms)",
+                    delta_ms, baseline_iat
                 ),
             })
         } else {
@@ -396,7 +411,8 @@ impl Detector for SpectralDetector {
 
         let (score, is_anomaly) = self.spectral.update(ctx.value);
 
-        if is_anomaly && score > 0.3 {
+        if is_anomaly && score > 0.15 {
+            // Lowered for higher recall
             let trend = if self.last_values.len() >= 2 {
                 let first = self.last_values.first().unwrap_or(&ctx.value);
                 let last = self.last_values.last().unwrap_or(&ctx.value);
@@ -407,7 +423,7 @@ impl Detector for SpectralDetector {
 
             Some(DetectionResult {
                 score,
-                weight: 1.0,
+                weight: 1.25, // Tier-1 Booster
                 signal_type: DetectorId::Spectral as u8,
                 expected: 0.0,
                 confidence: 0.85,
@@ -523,10 +539,11 @@ impl Detector for RRCFDetectorV2 {
         let (score, is_anomaly) = self.rrcf.update(ctx.value);
         self.warmup_count += 1;
 
-        if self.warmup_count > 20 && is_anomaly && score > 0.5 {
+        if self.warmup_count > 20 && is_anomaly && score > 0.4 {
+            // Lowered for higher recall
             Some(DetectionResult {
                 score,
-                weight: 1.1,
+                weight: 1.3, // Tier-1 Booster
                 signal_type: DetectorId::RRCF as u8,
                 expected: 0.0,
                 confidence: (score * 0.9).min(0.95),
@@ -748,8 +765,18 @@ impl Default for ProfileConfig {
 
 /// Enhanced Anomaly Profile with Adaptive Ensemble
 pub struct AnomalyProfile {
-    /// All 10 detectors
-    detectors: Vec<Box<dyn Detector>>,
+    // Detectors (Static Dispatch: No vtable overhead)
+    v_volume: VolumeDetectorV2,
+    v_dist: DistributionDetectorV2,
+    v_card: CardinalityDetectorV2,
+    v_burst: BurstDetectorV2,
+    v_spectral: SpectralDetector,
+    v_cp: ChangePointDetector,
+    v_rrcf: RRCFDetectorV2,
+    v_ms: MultiScaleDetectorV2,
+    v_behavioral: BehavioralFingerprintDetectorV2,
+    v_drift: DriftDetectorV2,
+
     /// Adaptive ensemble for weight learning
     ensemble: AdaptiveEnsemble,
     /// Event counter
@@ -771,34 +798,53 @@ impl AnomalyProfile {
 
     /// Create with custom configuration
     pub fn with_config(config: ProfileConfig) -> Self {
-        let detectors: Vec<Box<dyn Detector>> = vec![
-            Box::new(VolumeDetectorV2::new(
-                config.hw_alpha,
-                config.hw_beta,
-                config.hw_gamma,
-                config.period,
-            )),
-            Box::new(DistributionDetectorV2::new(
-                config.hist_bins,
-                config.min_val,
-                config.max_val,
-                config.hist_decay,
-            )),
-            Box::new(CardinalityDetectorV2::new()),
-            Box::new(BurstDetectorV2::new()),
-            Box::new(SpectralDetector::new()),
-            Box::new(ChangePointDetector::new()),
-            Box::new(RRCFDetectorV2::new()),
-            Box::new(MultiScaleDetectorV2::new()),
-            Box::new(BehavioralFingerprintDetectorV2::new()),
-            Box::new(DriftDetectorV2::new()),
+        let v_volume = VolumeDetectorV2::new(
+            config.hw_alpha,
+            config.hw_beta,
+            config.hw_gamma,
+            config.period,
+        );
+        let v_dist = DistributionDetectorV2::new(
+            config.hist_bins,
+            config.min_val,
+            config.max_val,
+            config.hist_decay,
+        );
+        let v_card = CardinalityDetectorV2::new();
+        let v_burst = BurstDetectorV2::new();
+        let v_spectral = SpectralDetector::new();
+        let v_cp = ChangePointDetector::new();
+        let v_rrcf = RRCFDetectorV2::new();
+        let v_ms = MultiScaleDetectorV2::new();
+        let v_behavioral = BehavioralFingerprintDetectorV2::new();
+        let v_drift = DriftDetectorV2::new();
+
+        let detector_names = vec![
+            v_volume.name().to_string(),
+            v_dist.name().to_string(),
+            v_card.name().to_string(),
+            v_burst.name().to_string(),
+            v_spectral.name().to_string(),
+            v_cp.name().to_string(),
+            v_rrcf.name().to_string(),
+            v_ms.name().to_string(),
+            v_behavioral.name().to_string(),
+            v_drift.name().to_string(),
         ];
 
-        let detector_names: Vec<String> = detectors.iter().map(|d| d.name().to_string()).collect();
         let ensemble = AdaptiveEnsemble::default_ensemble(detector_names);
 
         Self {
-            detectors,
+            v_volume,
+            v_dist,
+            v_card,
+            v_burst,
+            v_spectral,
+            v_cp,
+            v_rrcf,
+            v_ms,
+            v_behavioral,
+            v_drift,
             ensemble,
             event_count: 0,
             config,
@@ -885,49 +931,77 @@ impl AnomalyProfile {
         // to boost throughput significantly for normal traffic
         let is_very_normal = !is_warmup && (value - avg).abs() < 1.0 * std;
 
-        for detector in self.detectors.iter_mut() {
-            let detector_id = detector.id() as usize;
-
-            // Skip heavy detectors if traffic is very normal (Performance Optimization)
-            let is_heavy = detector_id == DetectorId::RRCF as usize
-                || detector_id == DetectorId::Spectral as usize;
-            if is_heavy && is_very_normal {
-                detector_outputs.push(DetectorOutput {
-                    detector_id,
-                    detector_name: detector.name().to_string(),
-                    score: 0.0,
-                    confidence: 1.0,
-                    signal_type: 0,
-                });
-                continue;
-            }
-
-            if let Some(result) = detector.update(&ctx) {
-                detector_scores[detector_id] = DetectorScore::new(
-                    result.score,
-                    result.confidence,
-                    true,
-                    result.expected,
-                    value,
-                );
-
-                detector_outputs.push(DetectorOutput {
-                    detector_id,
-                    detector_name: detector.name().to_string(),
-                    score: result.score,
-                    confidence: result.confidence,
-                    signal_type: result.signal_type,
-                });
-            } else {
-                detector_outputs.push(DetectorOutput {
-                    detector_id,
-                    detector_name: detector.name().to_string(),
-                    score: 0.0,
-                    confidence: 1.0,
-                    signal_type: 0,
-                });
-            }
-        }
+        // Run all 10 detectors with static dispatch
+        Self::run_detector(
+            &mut self.v_volume,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_dist,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_card,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_burst,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_spectral,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_cp,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_rrcf,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_ms,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_behavioral,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
+        Self::run_detector(
+            &mut self.v_drift,
+            &ctx,
+            is_very_normal,
+            &mut detector_scores,
+            &mut detector_outputs,
+        );
 
         // === STAGE 2: Combine with AdaptiveEnsemble ===
         let (ensemble_score, ensemble_confidence, weights) =
@@ -963,10 +1037,10 @@ impl AnomalyProfile {
 
         // TIER 1 DESIGN: MAXIMUM RECALL - Catch everything for Tier 2 to review
         // Reduced thresholds significantly to ensure we don't miss anomalies.
-        // If ANY detector shows elevated activity (>= 0.15), flag it.
-        let any_detector_fired = detector_scores.iter().any(|s| s.fired && s.score >= 0.15);
+        // If ANY detector shows elevated activity (>= 0.10), flag it.
+        let any_detector_fired = detector_scores.iter().any(|s| s.fired && s.score >= 0.10);
 
-        let is_anomaly = any_detector_fired || ensemble_score >= 0.15;
+        let is_anomaly = any_detector_fired || ensemble_score >= 0.10;
 
         AnomalySignal {
             entity_hash: unique_id_hash,
@@ -981,6 +1055,59 @@ impl AnomalyProfile {
             attribution,
             baseline,
             raw_value: value,
+        }
+    }
+
+    /// Optimized detector execution helper (Static Dispatch)
+    #[inline(always)]
+    fn run_detector<D: Detector>(
+        detector: &mut D,
+        ctx: &SignalContext,
+        is_very_normal: bool,
+        scores: &mut [DetectorScore; NUM_DETECTORS],
+        outputs: &mut Vec<DetectorOutput>,
+    ) {
+        let detector_id = detector.id() as usize;
+
+        // Skip heavy detectors if traffic is very normal (Performance Optimization)
+        let is_heavy = detector_id == DetectorId::RRCF as usize
+            || detector_id == DetectorId::Spectral as usize;
+
+        if is_heavy && is_very_normal {
+            outputs.push(DetectorOutput {
+                detector_id,
+                detector_name: detector.name().to_string(),
+                score: 0.0,
+                confidence: 1.0,
+                signal_type: 0,
+            });
+            return;
+        }
+
+        if let Some(result) = detector.update(ctx) {
+            scores[detector_id] = DetectorScore::new(
+                result.score,
+                result.confidence,
+                true,
+                result.expected,
+                ctx.value,
+            );
+
+            outputs.push(DetectorOutput {
+                detector_id,
+                detector_name: detector.name().to_string(),
+                score: result.score,
+                confidence: result.confidence,
+                signal_type: result.signal_type,
+            });
+        } else {
+            outputs.push(DetectorOutput {
+                detector_id,
+                detector_name: detector.name().to_string(),
+                score: 0.0,
+                confidence: 1.0,
+                signal_type: 0,
+            });
         }
     }
 
@@ -1035,12 +1162,26 @@ impl AnomalyProfile {
             .collect()
     }
 
-    /// Get detector statistics
+    /// Get detector statistics (Refactored for static fields)
     pub fn get_detector_stats(&self) -> Vec<(String, String)> {
-        self.detectors
-            .iter()
-            .map(|d| (d.name().to_string(), d.get_stats()))
-            .collect()
+        vec![
+            (self.v_volume.name().to_string(), self.v_volume.get_stats()),
+            (self.v_dist.name().to_string(), self.v_dist.get_stats()),
+            (self.v_card.name().to_string(), self.v_card.get_stats()),
+            (self.v_burst.name().to_string(), self.v_burst.get_stats()),
+            (
+                self.v_spectral.name().to_string(),
+                self.v_spectral.get_stats(),
+            ),
+            (self.v_cp.name().to_string(), self.v_cp.get_stats()),
+            (self.v_rrcf.name().to_string(), self.v_rrcf.get_stats()),
+            (self.v_ms.name().to_string(), self.v_ms.get_stats()),
+            (
+                self.v_behavioral.name().to_string(),
+                self.v_behavioral.get_stats(),
+            ),
+            (self.v_drift.name().to_string(), self.v_drift.get_stats()),
+        ]
     }
 
     /// Reset the profile
@@ -1135,8 +1276,7 @@ mod tests {
     #[test]
     fn test_profile_creation() {
         let profile = AnomalyProfile::default();
-        assert_eq!(profile.detectors.len(), 10);
-        assert_eq!(profile.event_count, 0);
+        assert_eq!(profile.event_count(), 0);
     }
 
     #[test]
@@ -1187,7 +1327,8 @@ mod tests {
 
         assert!(!checkpoint.is_empty());
 
+        let original_count = profile.event_count();
         let restored = AnomalyProfile::from_checkpoint(&checkpoint).unwrap();
-        assert_eq!(restored.detectors.len(), 10);
+        assert_eq!(restored.event_count(), original_count);
     }
 }

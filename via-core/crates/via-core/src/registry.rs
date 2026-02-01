@@ -193,7 +193,12 @@ impl<P> ProfileRegistry<P> {
     }
 
     /// Insert with priority level
-    pub fn insert_with_priority(&mut self, hash: u64, profile: P, priority: u8) -> Option<(u64, P)> {
+    pub fn insert_with_priority(
+        &mut self,
+        hash: u64,
+        profile: P,
+        priority: u8,
+    ) -> Option<(u64, P)> {
         let mut evicted = None;
 
         // Evict if at capacity
@@ -303,11 +308,7 @@ impl<P> ProfileRegistry<P> {
             best_candidate = self
                 .profiles
                 .iter()
-                .min_by(|a, b| {
-                    a.1.meta
-                        .last_access
-                        .cmp(&b.1.meta.last_access)
-                })
+                .min_by(|a, b| a.1.meta.last_access.cmp(&b.1.meta.last_access))
                 .map(|(&h, e)| (h, e.meta.eviction_score()));
         }
 
@@ -465,6 +466,9 @@ mod tests {
         registry.insert(4, "new".to_string());
 
         // High priority should survive
-        assert!(registry.contains(3), "High priority should survive eviction");
+        assert!(
+            registry.contains(3),
+            "High priority should survive eviction"
+        );
     }
 }

@@ -8,8 +8,8 @@
 //!   via-stress --batch-size 100 --concurrency 64
 
 use clap::Parser;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time;
 

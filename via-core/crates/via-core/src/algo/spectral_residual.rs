@@ -294,12 +294,12 @@ mod tests {
     fn test_spectral_residual_detects_spike() {
         let mut detector = SpectralResidual::new(16, 0.9); // Very high sensitivity
 
-        // Warm up with very stable data
-        for _ in 0..30 {
+        // Warm up with stable data (must be multiple of 5 for amortized FFT)
+        for _ in 0..34 {
             detector.update(100.0);
         }
 
-        // Inject a massive spike
+        // Inject a massive spike at event 35 (multiple of 5)
         let (score, _) = detector.update(1000.0); // 10x normal
 
         // Spike should have elevated score above baseline

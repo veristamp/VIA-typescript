@@ -21,8 +21,8 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use once_cell::sync::Lazy;
 use prometheus::{Counter, Encoder, Gauge, Histogram, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::{io::Write, thread};
+use std::io::Write;
+use std::thread;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -142,6 +142,12 @@ impl From<AnomalySignal> for AnomalyOutput {
     }
 }
 
+/// Ingest Packet for the decoupled ingestion layer
+pub enum IngestPacket {
+    Single(IngestEvent),
+    Batch(Vec<IngestEvent>),
+}
+
 /// Feedback request from Tier-2
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeedbackRequest {
@@ -162,8 +168,13 @@ fn default_confidence() -> f32 {
 /// Application state
 #[derive(Clone)]
 struct AppState {
-    shard_txs: Arc<Vec<Sender<InternalEvent>>>,
+    ingest_tx: tokio::sync::mpsc::Sender<IngestPacket>,
     feedback_tx: Sender<FeedbackRequest>,
+    _shard_count: usize,
+}
+
+thread_local! {
+    static PARSE_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(64 * 1024));
 }
 
 // ============================================================================
@@ -183,10 +194,15 @@ where
         let bytes = Bytes::from_request(req, _state)
             .await
             .map_err(|e| e.into_response())?;
-        let mut bytes_vec = bytes.to_vec();
 
-        let val = simd_json::from_slice::<T>(&mut bytes_vec)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid JSON").into_response())?;
+        let val = PARSE_BUF.with(|buf| {
+            let mut b = buf.borrow_mut();
+            b.clear();
+            b.extend_from_slice(&bytes);
+
+            simd_json::from_slice::<T>(&mut b)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid JSON").into_response())
+        })?;
 
         Ok(SimdJson(val))
     }
@@ -200,7 +216,7 @@ struct ShardWorker {
     id: usize,
     rx: Receiver<InternalEvent>,
     registry: ProfileRegistry<AnomalyProfile>,
-    persistence_tx: Sender<String>,
+    persistence_tx: Sender<AnomalyOutput>,
     feedback_rx: Receiver<FeedbackRequest>,
 }
 
@@ -208,7 +224,7 @@ impl ShardWorker {
     fn spawn(
         id: usize,
         rx: Receiver<InternalEvent>,
-        p_tx: Sender<String>,
+        p_tx: Sender<AnomalyOutput>,
         feedback_rx: Receiver<FeedbackRequest>,
         registry_config: RegistryConfig,
     ) -> thread::JoinHandle<()> {
@@ -264,11 +280,9 @@ impl ShardWorker {
                     if signal.is_anomaly {
                         ANOMALY_TOTAL.inc();
 
-                        // Create output
+                        // Offload serialization to persistence thread
                         let output: AnomalyOutput = signal.clone().into();
-                        let json = serde_json::to_string(&output).unwrap_or_default();
-
-                        let _ = self.persistence_tx.try_send(json + "\n");
+                        let _ = self.persistence_tx.try_send(output);
 
                         // Log critical anomalies
                         if signal.severity as u8 >= 3 {
@@ -363,7 +377,7 @@ impl ShardWorker {
 struct PersistenceManager;
 
 impl PersistenceManager {
-    fn spawn(rx: Receiver<String>) -> thread::JoinHandle<()> {
+    fn spawn(rx: Receiver<AnomalyOutput>) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("via-persistence".into())
             .spawn(move || {
@@ -378,7 +392,7 @@ impl PersistenceManager {
 
                 info!("Persistence manager active.");
 
-                while let Ok(msg) = rx.recv() {
+                while let Ok(output) = rx.recv() {
                     let now_hour = chrono::Local::now().format("%Y%m%d%H").to_string();
                     if now_hour != current_hour {
                         let _ = buffer.flush();
@@ -391,13 +405,63 @@ impl PersistenceManager {
                         buffer = std::io::BufWriter::with_capacity(128 * 1024, new_file);
                     }
 
-                    let _ = buffer.write_all(msg.as_bytes());
+                    // Perform serialization in persistence thread
+                    if let Ok(json) = serde_json::to_string(&output) {
+                        let _ = buffer.write_all(json.as_bytes());
+                        let _ = buffer.write_all(b"\n");
+                    }
                 }
 
                 let _ = buffer.flush();
                 info!("Persistence manager stopped.");
             })
             .expect("Failed to spawn persistence thread")
+    }
+}
+
+// ============================================================================
+// INGESTION LAYER (Decoupled Consumer)
+// ============================================================================
+
+struct IngestionLayer;
+
+impl IngestionLayer {
+    pub fn spawn(
+        mut rx: tokio::sync::mpsc::Receiver<IngestPacket>,
+        shard_txs: Vec<Sender<InternalEvent>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            info!("Ingestion layer consumer active.");
+            while let Some(packet) = rx.recv().await {
+                match packet {
+                    IngestPacket::Single(event) => {
+                        Self::route_event(event, &shard_txs);
+                    }
+                    IngestPacket::Batch(events) => {
+                        for event in events {
+                            Self::route_event(event, &shard_txs);
+                        }
+                    }
+                }
+            }
+            info!("Ingestion layer consumer stopped.");
+        })
+    }
+
+    #[inline(always)]
+    fn route_event(event: IngestEvent, shard_txs: &[Sender<InternalEvent>]) {
+        let hash = xxhash_rust::xxh3::xxh3_64(event.u.as_bytes());
+        let shard_id = (hash as usize) % shard_txs.len();
+
+        let internal = InternalEvent {
+            uid_hash: hash,
+            val: event.v,
+            ts: event.t,
+        };
+
+        if shard_txs[shard_id].try_send(internal).is_err() {
+            DROPPED_TOTAL.inc();
+        }
     }
 }
 
@@ -410,7 +474,15 @@ async fn ingest(
     SimdJson(event): SimdJson<IngestEvent>,
 ) -> StatusCode {
     INGEST_TOTAL.inc();
-    process_single_event(event, &state)
+    if state
+        .ingest_tx
+        .try_send(IngestPacket::Single(event))
+        .is_err()
+    {
+        DROPPED_TOTAL.inc();
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    StatusCode::ACCEPTED
 }
 
 async fn ingest_batch(
@@ -420,51 +492,22 @@ async fn ingest_batch(
     let count = events.len();
     INGEST_TOTAL.inc_by(count as f64);
 
-    for event in events {
-        let hash = xxhash_rust::xxh3::xxh3_64(event.u.as_bytes());
-        let shard_id = (hash as usize) % state.shard_txs.len();
-
-        let internal = InternalEvent {
-            uid_hash: hash,
-            val: event.v,
-            ts: event.t,
-        };
-
-        if state.shard_txs[shard_id].try_send(internal).is_err() {
-            DROPPED_TOTAL.inc();
-        }
+    if state
+        .ingest_tx
+        .try_send(IngestPacket::Batch(events))
+        .is_err()
+    {
+        DROPPED_TOTAL.inc();
+        return StatusCode::SERVICE_UNAVAILABLE;
     }
 
     StatusCode::ACCEPTED
-}
-
-#[inline(always)]
-fn process_single_event(event: IngestEvent, state: &AppState) -> StatusCode {
-    let hash = xxhash_rust::xxh3::xxh3_64(event.u.as_bytes());
-    let shard_id = (hash as usize) % state.shard_txs.len();
-
-    let internal = InternalEvent {
-        uid_hash: hash,
-        val: event.v,
-        ts: event.t,
-    };
-
-    match state.shard_txs[shard_id].try_send(internal) {
-        Ok(_) => StatusCode::ACCEPTED,
-        Err(_) => {
-            DROPPED_TOTAL.inc();
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-    }
 }
 
 async fn feedback_handler(
     State(state): State<AppState>,
     Json(feedback): Json<FeedbackRequest>,
 ) -> StatusCode {
-    // Route to appropriate shard based on entity hash
-    let _shard_id = (feedback.entity_hash as usize) % state.shard_txs.len();
-
     // We send via the shared feedback channel; shard workers poll it
     match state.feedback_tx.try_send(feedback) {
         Ok(_) => StatusCode::ACCEPTED,
@@ -535,7 +578,7 @@ async fn main() {
     );
 
     // Persistence channel
-    let (p_tx, p_rx) = bounded::<String>(200_000);
+    let (p_tx, p_rx) = bounded::<AnomalyOutput>(200_000);
     let persistence_handle = PersistenceManager::spawn(p_rx);
 
     // Feedback channel (shared across shards)
@@ -560,9 +603,14 @@ async fn main() {
     drop(p_tx);
     drop(feedback_rx);
 
+    // Decoupled Ingestion Channel
+    let (ingest_tx, ingest_rx) = tokio::sync::mpsc::channel::<IngestPacket>(100_000);
+    let _ingestion_handle = IngestionLayer::spawn(ingest_rx, txs);
+
     let state = AppState {
-        shard_txs: Arc::new(txs),
+        ingest_tx,
         feedback_tx,
+        _shard_count: shard_count,
     };
 
     let app = Router::new()

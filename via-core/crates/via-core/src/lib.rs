@@ -462,27 +462,23 @@ mod tests {
 
     #[test]
     fn test_ffi_profile_lifecycle() {
-        unsafe {
-            let profile = via_create_profile();
-            assert!(!profile.is_null());
+        let profile = via_create_profile();
+        assert!(!profile.is_null());
 
-            let signal = via_process_event(profile, 1000000, 12345, 100.0);
-            assert!(!signal.is_null());
+        let signal = via_process_event(profile, 1000000, 12345, 100.0);
+        assert!(!signal.is_null());
 
-            let is_anomaly = via_signal_is_anomaly(signal);
-            assert!(!is_anomaly); // Warmup period
+        let is_anomaly = via_signal_is_anomaly(signal);
+        assert!(!is_anomaly); // Warmup period
 
-            via_free_signal(signal);
-            free_profile(profile);
-        }
+        via_free_signal(signal);
+        free_profile(profile);
     }
 
     #[test]
     fn test_detector_names() {
-        unsafe {
-            assert!(!via_detector_name(0).is_null());
-            assert!(via_detector_name(100).is_null());
-            assert_eq!(via_num_detectors(), 10);
-        }
+        assert!(!via_detector_name(0).is_null());
+        assert!(via_detector_name(100).is_null());
+        assert_eq!(via_num_detectors(), 10);
     }
 }

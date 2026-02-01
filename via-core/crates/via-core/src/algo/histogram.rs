@@ -64,11 +64,7 @@ impl FadingHistogram {
 
         // Return Inverse Probability (Lower prob = Higher Anomaly)
         // Clip to avoid infinity
-        if prob < 0.001 {
-            100.0
-        } else {
-            1.0 / prob
-        }
+        if prob < 0.001 { 100.0 } else { 1.0 / prob }
     }
 
     /// Get rarity score (0.0 = common, 1.0 = extremely rare)
