@@ -153,7 +153,10 @@ pub struct Attribution {
 
 impl Attribution {
     /// Compute attribution from detector scores and weights
-    pub fn compute(scores: &[DetectorScore; NUM_DETECTORS], weights: &[f64; NUM_DETECTORS]) -> Self {
+    pub fn compute(
+        scores: &[DetectorScore; NUM_DETECTORS],
+        weights: &[f64; NUM_DETECTORS],
+    ) -> Self {
         let mut contributions: [(usize, f64); NUM_DETECTORS] = [(0, 0.0); NUM_DETECTORS];
         let mut detectors_fired = 0u8;
 
@@ -345,7 +348,19 @@ impl AnomalySignalBuilder {
         self.signal.ensemble_score = ensemble_score;
         self.signal.confidence = confidence;
         self.signal.severity = Severity::from_score(ensemble_score);
-        self.signal.is_anomaly = ensemble_score >= 0.4 && confidence >= 0.5;
+
+        // TIER 1 DESIGN: HIGH RECALL - Catch everything for Tier 2 to review
+        // Flag as anomaly if:
+        // 1. Any detector fired with reasonable score (>= 0.3), OR
+        // 2. Ensemble score is elevated (>= 0.2)
+        // False positives are OK here - Tier 2 filters them via API
+        let any_detector_fired = self
+            .signal
+            .detector_scores
+            .iter()
+            .any(|s| s.fired && s.score >= 0.3);
+
+        self.signal.is_anomaly = any_detector_fired || ensemble_score >= 0.2;
 
         // Compute attribution
         let weights: [f64; NUM_DETECTORS] = {

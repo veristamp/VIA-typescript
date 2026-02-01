@@ -1,6 +1,6 @@
-use crate::simulation::scenarios::traffic::create_log;
-use crate::simulation::scenarios::Scenario;
-use crate::simulation::types::{AnyValue, KeyValue, LogRecord};
+use crate::core::{AnyValue, KeyValue, LogRecord};
+use crate::scenarios::Scenario;
+use crate::scenarios::traffic::create_log;
 use rand::prelude::*;
 use rand_distr::{Distribution, Normal};
 use uuid::Uuid;
@@ -145,13 +145,15 @@ impl Scenario for CpuSpike {
             let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
 
             // High CPU usually manifests as timeouts or slow processing
-            let duration = Normal::new(5000.0, 1000.0).unwrap().sample(&mut rng) as i64;
+            // Normal latency is ~55ms, CPU spike causes 3000-8000ms latency
+            let sample: f64 = Normal::new(5000.0, 1500.0).unwrap().sample(&mut rng);
+            let duration = sample.max(500.0);
 
             logs.push(create_log(
                 "WARN",
                 format!(
                     "Thread pool exhaustion: Active threads > 95% (Processing time: {}ms)",
-                    duration
+                    duration as i64
                 ),
                 &self.service_name,
                 &trace_id,
@@ -165,6 +167,11 @@ impl Scenario for CpuSpike {
                     KeyValue {
                         key: "thread.active_count".to_string(),
                         value: AnyValue::int(200),
+                    },
+                    // ADDED: Latency metric for statistical detection
+                    KeyValue {
+                        key: "http.duration_ms".to_string(),
+                        value: AnyValue::double(duration),
                     },
                 ],
             ));

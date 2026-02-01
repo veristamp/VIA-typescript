@@ -1,5 +1,5 @@
-use crate::simulation::scenarios::Scenario;
-use crate::simulation::types::{AnyValue, KeyValue, LogRecord};
+use crate::core::{AnyValue, KeyValue, LogRecord};
+use crate::scenarios::Scenario;
 use rand::prelude::*;
 use rand_distr::{Distribution, LogNormal, Normal};
 use uuid::Uuid;
@@ -36,6 +36,8 @@ pub fn create_log(
         severityText: level.to_string(),
         body: AnyValue::string(body),
         attributes,
+        isGroundTruthAnomaly: false,
+        anomalyId: None,
     }
 }
 

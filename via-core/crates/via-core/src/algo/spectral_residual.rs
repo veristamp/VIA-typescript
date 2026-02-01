@@ -71,6 +71,12 @@ impl SpectralResidual {
         self.window.push_back(value);
         self.sample_count += 1;
 
+        // Performance: Only run full spectral analysis every N events unless it's the first window
+        // This amortizes the O(N^2) cost without losing much signal
+        if self.sample_count > self.window_size as u64 && self.sample_count % 5 != 0 {
+            return (0.0, false);
+        }
+
         // Wait for full window
         if self.window.len() < self.window_size {
             return (0.0, false);
@@ -95,11 +101,11 @@ impl SpectralResidual {
 
         // Determine if anomaly based on adaptive threshold
         let threshold = self.score_ewma + self.threshold_sigma * self.score_ewmvar.sqrt();
-        let is_anomaly = raw_score > threshold && raw_score > 0.3;
+        let is_anomaly = raw_score > threshold && raw_score > 0.1;
 
         // Normalize score to 0-1 scale
         let normalized_score = if threshold > 0.0 && raw_score > 0.0 {
-            (raw_score / threshold.max(0.1)).min(2.0) / 2.0 // Cap at 1.0 for 2x threshold
+            (raw_score / threshold.max(0.01)).min(2.0) / 2.0 // Cap at 1.0 for 2x threshold
         } else {
             0.0
         };

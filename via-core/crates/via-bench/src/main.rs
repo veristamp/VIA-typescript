@@ -6,11 +6,10 @@
 //!   via-bench security-audit             # Run security-focused test
 //!   via-bench performance-stress         # Run performance test
 //!   via-bench throughput                 # Maximum throughput test
-//!   via-bench detector <name>            # Benchmark single detector
 //!   via-bench compare results1.json results2.json  # Compare results
 
 use clap::{Parser, Subcommand};
-use via_bench::{scenarios, BenchmarkConfig, BenchmarkRunner};
+use via_bench::{BenchmarkConfig, BenchmarkRunner, scenarios};
 
 #[derive(Parser)]
 #[command(name = "via-bench")]
@@ -26,6 +25,10 @@ struct Cli {
     /// Verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Batch size for batch processing mode (0 = single event, default)
+    #[arg(short, long, global = true, default_value = "0")]
+    batch: usize,
 }
 
 #[derive(Subcommand)]
@@ -39,7 +42,7 @@ enum Commands {
 
     /// Run mixed workload benchmark
     MixedWorkload {
-        /// Duration override
+        /// Duration override (minutes)
         #[arg(short, long)]
         duration: Option<u64>,
     },
@@ -57,15 +60,8 @@ enum Commands {
         duration: u64,
     },
 
-    /// Benchmark single detector
-    Detector {
-        /// Detector name
-        name: String,
-
-        /// Duration
-        #[arg(short, long, default_value = "5")]
-        duration: u64,
-    },
+    /// Quick validation test
+    Quick,
 
     /// Compare benchmark results
     Compare {
@@ -97,25 +93,26 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    let batch_size = cli.batch;
 
     match cli.command {
         Commands::RunAll { format } => {
-            run_all_benchmarks(&format, cli.output, cli.verbose);
+            run_all_benchmarks(&format, cli.output, cli.verbose, batch_size);
         }
         Commands::MixedWorkload { duration } => {
-            run_single_benchmark("mixed", duration, cli.output);
+            run_single_benchmark("mixed", duration, cli.output, batch_size);
         }
         Commands::SecurityAudit => {
-            run_single_benchmark("security", None, cli.output);
+            run_single_benchmark("security", None, cli.output, batch_size);
         }
         Commands::PerformanceStress => {
-            run_single_benchmark("performance", None, cli.output);
+            run_single_benchmark("performance", None, cli.output, batch_size);
         }
         Commands::Throughput { duration } => {
-            run_throughput_benchmark(duration, cli.output);
+            run_throughput_benchmark(duration, cli.output, batch_size);
         }
-        Commands::Detector { name, duration } => {
-            run_detector_benchmark(&name, duration, cli.output);
+        Commands::Quick => {
+            run_single_benchmark("quick", None, cli.output, batch_size);
         }
         Commands::Compare { files, output } => {
             compare_results(&files, output);
@@ -133,15 +130,28 @@ fn main() {
     }
 }
 
-fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool) {
-    println!("Running all benchmark scenarios...\n");
+fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool, batch_size: usize) {
+    println!(
+        "Running all benchmarks... (batch_size: {})\n",
+        if batch_size > 0 {
+            format!("{}", batch_size)
+        } else {
+            "single".to_string()
+        }
+    );
 
-    let configs = vec![
+    let configs: Vec<BenchmarkConfig> = vec![
         scenarios::mixed_workload(),
         scenarios::security_audit(),
         scenarios::performance_stress(),
         scenarios::throughput_test(),
-    ];
+    ]
+    .into_iter()
+    .map(|mut c| {
+        c.batch_size = batch_size;
+        c
+    })
+    .collect();
 
     let mut all_results = Vec::new();
 
@@ -152,12 +162,13 @@ fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool) {
 
         let mut runner = BenchmarkRunner::new();
         let results = runner.run(config);
-        all_results.push(results.clone());
 
         if verbose {
-            runner.print_results();
+            runner.print_results(&results);
             println!();
         }
+
+        all_results.push(results);
     }
 
     // Export results
@@ -174,13 +185,22 @@ fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool) {
     }
 }
 
-fn run_single_benchmark(name: &str, duration_override: Option<u64>, output: Option<String>) {
-    let config = match name {
+fn run_single_benchmark(
+    name: &str,
+    duration_override: Option<u64>,
+    output: Option<String>,
+    batch_size: usize,
+) {
+    let mut config = match name {
         "mixed" => scenarios::mixed_workload(),
         "security" => scenarios::security_audit(),
         "performance" => scenarios::performance_stress(),
+        "quick" => scenarios::quick_validation(),
         _ => scenarios::mixed_workload(),
     };
+
+    // Apply batch_size
+    config.batch_size = batch_size;
 
     // Apply duration override if specified
     let config = if let Some(duration) = duration_override {
@@ -192,11 +212,19 @@ fn run_single_benchmark(name: &str, duration_override: Option<u64>, output: Opti
         config
     };
 
-    println!("Running benchmark: {}\n", config.name);
+    println!(
+        "Running benchmark: {} (batch_size: {})\n",
+        config.name,
+        if batch_size > 0 {
+            format!("{}", batch_size)
+        } else {
+            "single".to_string()
+        }
+    );
 
     let mut runner = BenchmarkRunner::new();
     let results = runner.run(config);
-    runner.print_results();
+    runner.print_results(&results);
 
     if let Some(output_file) = output {
         let json = serde_json::to_string_pretty(&results).unwrap();
@@ -205,35 +233,33 @@ fn run_single_benchmark(name: &str, duration_override: Option<u64>, output: Opti
     }
 }
 
-fn run_throughput_benchmark(duration: u64, output: Option<String>) {
-    println!("Running throughput test ({} minutes)...\n", duration);
+fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: usize) {
+    println!(
+        "Running throughput test ({} minutes, batch_size: {})...\n",
+        duration,
+        if batch_size > 0 {
+            format!("{}", batch_size)
+        } else {
+            "single".to_string()
+        }
+    );
 
     let config = BenchmarkConfig {
         name: "Throughput Test".to_string(),
-        topology: via_bench::Topology::Infrastructure,
+        base_scenario: "normal_traffic".to_string(),
         duration_minutes: duration,
-        window_size_sec: 1,
+        tick_ms: 10, // Small tick for high throughput
         anomalies: vec![],
+        batch_size,
     };
 
     let mut runner = BenchmarkRunner::new();
     let results = runner.run(config);
-    runner.print_results();
+    runner.print_results(&results);
 
     if let Some(output_file) = output {
         let json = serde_json::to_string_pretty(&results).unwrap();
         std::fs::write(&output_file, json).expect("Failed to write results");
-    }
-}
-
-fn run_detector_benchmark(name: &str, duration: u64, output: Option<String>) {
-    println!("Benchmarking detector: {} ({} minutes)\n", name, duration);
-    println!("This would run a targeted benchmark for detector: {}", name);
-    println!("(Single detector benchmarking not yet implemented)");
-
-    // Placeholder
-    if let Some(output_file) = output {
-        println!("Results would be saved to: {}", output_file);
     }
 }
 
@@ -298,7 +324,7 @@ fn list_detectors() {
     }
 
     println!();
-    println!("Use 'via-bench detector <name>' to benchmark a specific detector.");
+    println!("Use 'via-bench <scenario>' to run a benchmark.");
 }
 
 fn export_results(input: &str, format: &str, output: Option<String>) {
@@ -420,10 +446,9 @@ fn generate_csv_report(results: &via_bench::BenchmarkResults) -> String {
         "P99 Latency μs,{:.2}\n",
         results.latency_micros.p99_micros
     ));
-    csv.push_str(&format!(
-        "False Positive Rate,{:.4}\n",
-        results.false_positive_rate
-    ));
+    csv.push_str(&format!("Precision,{:.4}\n", results.precision));
+    csv.push_str(&format!("Recall,{:.4}\n", results.recall));
+    csv.push_str(&format!("F1-Score,{:.4}\n", results.f1_score));
 
     csv.push_str("\nDetector,TP,FP,TN,FN,Precision,Recall,F1\n");
     for (name, m) in &results.detector_metrics {

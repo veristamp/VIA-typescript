@@ -525,15 +525,15 @@ pub struct RRCFDetector {
 impl RRCFDetector {
     pub fn new_univariate(shingle_size: usize) -> Self {
         Self {
-            rrcf: StreamingRRCF::univariate(20, 256, shingle_size),
-            threshold: 0.5,
+            rrcf: StreamingRRCF::univariate(10, 128, shingle_size), // Reduced for speed
+            threshold: 0.2, // Lower threshold for high recall
         }
     }
 
     pub fn new_multivariate(dimensions: usize) -> Self {
         Self {
-            rrcf: StreamingRRCF::multivariate(dimensions, 20, 256),
-            threshold: 0.5,
+            rrcf: StreamingRRCF::multivariate(dimensions, 10, 128), // Reduced for speed
+            threshold: 0.2, // Lower threshold for high recall
         }
     }
 

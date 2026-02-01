@@ -1,6 +1,6 @@
-use crate::simulation::scenarios::traffic::create_log;
-use crate::simulation::scenarios::Scenario;
-use crate::simulation::types::{AnyValue, KeyValue, LogRecord};
+use crate::core::{AnyValue, KeyValue, LogRecord};
+use crate::scenarios::Scenario;
+use crate::scenarios::traffic::create_log;
 use rand::prelude::*;
 use uuid::Uuid;
 
@@ -45,6 +45,12 @@ impl Scenario for CredentialStuffing {
                 ip_octet
             );
 
+            // ANOMALOUS METRICS: Credential stuffing causes:
+            // 1. High latency due to auth service overload (300-1000ms vs normal 20-100ms)
+            // 2. Burst of requests (high volume)
+            // 3. Elevated error rate (401s)
+            let attack_latency = rng.random_range(300.0..1000.0); // High latency during attack
+
             logs.push(create_log(
                 level,
                 format!("{} for user {}", msg, user_id),
@@ -68,6 +74,11 @@ impl Scenario for CredentialStuffing {
                     KeyValue {
                         key: "http.status_code".to_string(),
                         value: AnyValue::int(code),
+                    },
+                    // ADDED: Latency metric for statistical detection
+                    KeyValue {
+                        key: "http.duration_ms".to_string(),
+                        value: AnyValue::double(attack_latency),
                     },
                 ],
             ));

@@ -876,8 +876,31 @@ impl AnomalyProfile {
         let mut detector_outputs: Vec<DetectorOutput> = Vec::with_capacity(NUM_DETECTORS);
         let mut detector_scores = [DetectorScore::default(); NUM_DETECTORS];
 
+        let n = self.event_count as f64;
+        let avg = self.value_sum / n.max(1.0);
+        let variance = (self.value_sum_sq / n.max(1.0)) - (avg * avg);
+        let std = variance.max(0.0).sqrt();
+
+        // Fast path: if the value is very close to the mean, skip heavy detectors
+        // to boost throughput significantly for normal traffic
+        let is_very_normal = !is_warmup && (value - avg).abs() < 1.0 * std;
+
         for detector in self.detectors.iter_mut() {
             let detector_id = detector.id() as usize;
+
+            // Skip heavy detectors if traffic is very normal (Performance Optimization)
+            let is_heavy = detector_id == DetectorId::RRCF as usize
+                || detector_id == DetectorId::Spectral as usize;
+            if is_heavy && is_very_normal {
+                detector_outputs.push(DetectorOutput {
+                    detector_id,
+                    detector_name: detector.name().to_string(),
+                    score: 0.0,
+                    confidence: 1.0,
+                    signal_type: 0,
+                });
+                continue;
+            }
 
             if let Some(result) = detector.update(&ctx) {
                 detector_scores[detector_id] = DetectorScore::new(
@@ -917,11 +940,6 @@ impl AnomalyProfile {
         }
 
         // Compute baseline summary
-        let n = self.event_count as f64;
-        let avg = self.value_sum / n.max(1.0);
-        let variance = (self.value_sum_sq / n.max(1.0)) - (avg * avg);
-        let std = variance.max(0.0).sqrt();
-
         let baseline = BaselineSummary {
             avg_value: avg as f32,
             std_value: std as f32,
@@ -942,8 +960,13 @@ impl AnomalyProfile {
 
         // Build the signal
         let severity = Severity::from_score(ensemble_score);
-        let is_anomaly =
-            ensemble_score >= 0.4 && ensemble_confidence >= self.config.confidence_threshold;
+
+        // TIER 1 DESIGN: MAXIMUM RECALL - Catch everything for Tier 2 to review
+        // Reduced thresholds significantly to ensure we don't miss anomalies.
+        // If ANY detector shows elevated activity (>= 0.15), flag it.
+        let any_detector_fired = detector_scores.iter().any(|s| s.fired && s.score >= 0.15);
+
+        let is_anomaly = any_detector_fired || ensemble_score >= 0.15;
 
         AnomalySignal {
             entity_hash: unique_id_hash,
