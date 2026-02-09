@@ -200,6 +200,12 @@ export class QdrantService {
 
 			await this.ensurePayloadIndex(collectionName, "start_ts", "integer");
 			await this.ensurePayloadIndex(collectionName, "timestamp", "integer");
+			await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
+			await this.ensurePayloadIndex(collectionName, "tenant_id", {
+				type: "keyword",
+				is_tenant: true,
+			});
+			await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
 			await this.ensurePayloadIndex(collectionName, "service", "keyword");
 			await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
 			await this.ensurePayloadIndex(collectionName, "body", {

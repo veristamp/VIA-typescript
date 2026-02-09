@@ -1,17 +1,20 @@
 import { Hono } from "hono";
 import { z } from "zod";
+import { getLatestDeadLetters } from "../../db/registry";
 import type { ForensicAnalysisService } from "../../services/forensic-analysis-service";
+import type { IncidentService } from "../../services/incident-service";
+import type { Tier2QueueService } from "../../services/tier2-queue-service";
 
 const app = new Hono();
 
-// Type definitions for Hono context
 declare module "hono" {
 	interface ContextVariableMap {
 		forensicAnalysisService: ForensicAnalysisService;
+		incidentService: IncidentService;
+		tier2QueueService: Tier2QueueService;
 	}
 }
 
-// Validation schemas
 const FindClustersRequestSchema = z.object({
 	start_ts: z.number().int(),
 	end_ts: z.number().int(),
@@ -45,9 +48,7 @@ app.post("/clusters", async (c) => {
 		result.data.text_filter,
 	);
 
-	return c.json({
-		clusters,
-	});
+	return c.json({ clusters });
 });
 
 app.post("/triage", async (c) => {
@@ -71,9 +72,7 @@ app.post("/triage", async (c) => {
 		result.data.end_ts,
 	);
 
-	return c.json({
-		triage_results: triageResults,
-	});
+	return c.json({ triage_results: triageResults });
 });
 
 app.post("/correlate", async (c) => {
@@ -113,9 +112,44 @@ app.get("/incident/:metaIncidentId", async (c) => {
 
 	const graph = await forensicAnalysisService.getIncidentGraph(metaIncidentId);
 
-	return c.json({
-		graph,
-	});
+	return c.json({ graph });
+});
+
+app.get("/incidents", async (c) => {
+	const incidentService = c.get("incidentService") as IncidentService;
+	const parsed = Number(c.req.query("limit") ?? "50");
+	const limit = Number.isFinite(parsed)
+		? Math.min(Math.max(parsed, 1), 500)
+		: 50;
+	const incidents = await incidentService.listIncidents(limit);
+	return c.json({ incidents });
+});
+
+app.get("/incidents/:incidentId", async (c) => {
+	const incidentService = c.get("incidentService") as IncidentService;
+	const incidentId = c.req.param("incidentId");
+	if (!incidentId) {
+		return c.json({ error: "incidentId parameter is required" }, 400);
+	}
+	const result = await incidentService.getIncident(incidentId);
+	if (!result) {
+		return c.json({ error: "incident not found" }, 404);
+	}
+	return c.json(result);
+});
+
+app.get("/pipeline/stats", (c) => {
+	const queue = c.get("tier2QueueService") as Tier2QueueService;
+	return c.json({ queue: queue.getStats() });
+});
+
+app.get("/pipeline/dead-letters", async (c) => {
+	const parsed = Number(c.req.query("limit") ?? "50");
+	const limit = Number.isFinite(parsed)
+		? Math.min(Math.max(parsed, 1), 500)
+		: 50;
+	const deadLetters = await getLatestDeadLetters(limit);
+	return c.json({ dead_letters: deadLetters });
 });
 
 export const analysisRoutes = app;

@@ -19,3 +19,34 @@ export interface BatchSummary {
 		uniqueIds: string[];
 	}>;
 }
+
+export interface CanonicalTier2Event {
+	eventId: string;
+	schemaVersion: number;
+	tenantId: string;
+	entityHash: number | null;
+	entityId: string;
+	timestamp: number;
+	score: number;
+	severity: number;
+	primaryDetector: number;
+	detectorsFired: number;
+	confidence: number;
+	detectorScores: number[];
+	attributes: Record<string, unknown>;
+}
+
+export type IncidentStatus = "new" | "suppressed" | "merged" | "escalated";
+
+export interface IncidentCandidate {
+	incidentId: string;
+	memberPointIds: string[];
+	reason: "temporal" | "semantic" | "trace";
+	confidence: number;
+	firstSeenTs: number;
+	lastSeenTs: number;
+	severityMax: number;
+	scoreMax: number;
+	entityKey: string;
+	evidence: Record<string, unknown>;
+}

@@ -1,17 +1,13 @@
+import type { CanonicalTier2Event } from "../types";
 import { logger } from "../utils/logger";
 import type { ForensicAnalysisService } from "./forensic-analysis-service";
+import type { IncidentService } from "./incident-service";
 import type { QdrantService } from "./qdrant-service";
 
-export interface LegacyAnomalySignal {
-	t: number;
-	u: string;
-	score: number;
-	severity: number;
-	type: number;
-}
-
 export interface Tier1AnomalySignalV1 {
-	schema_version?: number;
+	event_id: string;
+	schema_version: number;
+	tenant_id: string;
 	entity_hash: number;
 	timestamp: number;
 	score: number;
@@ -20,100 +16,83 @@ export interface Tier1AnomalySignalV1 {
 	detectors_fired: number;
 	confidence: number;
 	detector_scores: number[];
+	attributes?: Record<string, unknown>;
 }
 
-export type IncomingAnomalySignal = LegacyAnomalySignal | Tier1AnomalySignalV1;
-
-interface NormalizedAnomalySignal {
-	schemaVersion: number;
-	entityHash: number | null;
-	entityId: string;
-	timestamp: number;
-	score: number;
-	severity: number;
-	signalType: number;
-	detectorsFired: number;
-	confidence: number;
-	detectorScores: number[];
-}
+export type IncomingAnomalySignal = Tier1AnomalySignalV1;
 
 export class Tier2Service {
 	constructor(
 		private qdrant: QdrantService,
 		private forensic: ForensicAnalysisService,
+		private incidents: IncidentService,
 	) {}
 
 	private normalizeToUnixSeconds(ts: number): number {
 		if (!Number.isFinite(ts) || ts <= 0) {
 			return Math.floor(Date.now() / 1000);
 		}
-		// ns
 		if (ts > 1e15) return Math.floor(ts / 1e9);
-		// ms
 		if (ts > 1e12) return Math.floor(ts / 1e3);
 		return Math.floor(ts);
 	}
 
-	private normalizeSignal(
-		signal: IncomingAnomalySignal,
-	): NormalizedAnomalySignal {
-		if ("entity_hash" in signal && "timestamp" in signal) {
-			const entityHash = signal.entity_hash;
-			const timestamp = this.normalizeToUnixSeconds(signal.timestamp);
-			return {
-				schemaVersion: signal.schema_version ?? 1,
-				entityHash,
-				entityId: `hash:${entityHash}`,
-				timestamp,
-				score: signal.score,
-				severity: signal.severity,
-				signalType: signal.primary_detector,
-				detectorsFired: signal.detectors_fired,
-				confidence: signal.confidence,
-				detectorScores: signal.detector_scores ?? [],
-			};
-		}
-
-		const timestamp = this.normalizeToUnixSeconds(signal.t);
+	private normalizeSignal(signal: IncomingAnomalySignal): CanonicalTier2Event {
+		const timestamp = this.normalizeToUnixSeconds(signal.timestamp);
 		return {
-			schemaVersion: 0,
-			entityHash: null,
-			entityId: signal.u,
+			eventId: signal.event_id,
+			schemaVersion: signal.schema_version,
+			tenantId: signal.tenant_id,
+			entityHash: signal.entity_hash,
+			entityId: `hash:${signal.entity_hash}`,
 			timestamp,
 			score: signal.score,
 			severity: signal.severity,
-			signalType: signal.type,
-			detectorsFired: 1,
-			confidence: 0.5,
-			detectorScores: [],
+			primaryDetector: signal.primary_detector,
+			detectorsFired: signal.detectors_fired,
+			confidence: signal.confidence,
+			detectorScores: signal.detector_scores,
+			attributes: signal.attributes ?? {},
 		};
 	}
 
-	async processAnomalyBatch(signals: IncomingAnomalySignal[]) {
+	deriveBatchEventId(signals: IncomingAnomalySignal[]): string {
+		const normalized = signals.map((signal) => this.normalizeSignal(signal));
+		const seed = normalized
+			.map((event) => `${event.eventId}:${event.timestamp}`)
+			.sort()
+			.join("|");
+		return Bun.hash.xxHash64(seed || String(Date.now())).toString(16);
+	}
+
+	async processAnomalyBatch(signals: IncomingAnomalySignal[]): Promise<void> {
 		if (!signals || signals.length === 0) return;
 
-		logger.info("Processing Tier-2 anomaly batch", { count: signals.length });
-
 		const normalized = signals.map((signal) => this.normalizeSignal(signal));
+		logger.info("Processing Tier-2 canonical anomaly batch", {
+			count: normalized.length,
+		});
 
-		// Transform to Tier-2 storage payload.
 		const events = normalized.map((sig) => {
-			const context = `Anomaly detector=${sig.signalType} entity=${sig.entityId} score=${sig.score.toFixed(4)} severity=${sig.severity}`;
+			const context = `anomaly event=${sig.eventId} detector=${sig.primaryDetector} entity=${sig.entityId} score=${sig.score.toFixed(4)} severity=${sig.severity.toFixed(4)}`;
 			return {
 				textForEmbedding: context,
 				payload: {
+					event_id: sig.eventId,
 					entity_type: "anomaly",
 					schema_version: sig.schemaVersion,
+					tenant_id: sig.tenantId,
 					entity_hash: sig.entityHash,
 					entity_id: sig.entityId,
 					start_ts: sig.timestamp,
 					timestamp: sig.timestamp,
 					score: sig.score,
 					severity: sig.severity,
-					signal_type: sig.signalType,
+					signal_type: sig.primaryDetector,
 					detectors_fired: sig.detectorsFired,
 					confidence: sig.confidence,
 					detector_scores: sig.detectorScores,
+					attributes: sig.attributes,
 					context,
 				},
 			};
@@ -123,6 +102,12 @@ export class Tier2Service {
 
 		const endTs = Math.floor(Date.now() / 1000);
 		const startTs = endTs - 3600;
-		await this.forensic.correlateIncidents(startTs, endTs);
+		const candidates = await this.forensic.deriveIncidentCandidates(
+			startTs,
+			endTs,
+			normalized,
+		);
+		await this.incidents.seedSingleEventIncident(normalized);
+		await this.incidents.applyCandidates(candidates);
 	}
 }

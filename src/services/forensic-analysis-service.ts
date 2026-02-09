@@ -1,5 +1,6 @@
 import { getIncidentGraph, saveIncidentGraph } from "../db/registry";
-import type { QdrantService } from "./qdrant-service";
+import type { CanonicalTier2Event, IncidentCandidate } from "../types";
+import type { QdrantScoredPoint, QdrantService } from "./qdrant-service";
 
 export interface ClusterResult {
 	clusterId: string | number;
@@ -14,6 +15,18 @@ export interface TriageResult {
 	id: string | number;
 	score: number;
 	payload: Record<string, unknown>;
+}
+
+interface CandidateAccumulator {
+	memberPointIds: Set<string>;
+	firstSeenTs: number;
+	lastSeenTs: number;
+	severityMax: number;
+	scoreMax: number;
+	entityKey: string;
+	evidence: Record<string, unknown>;
+	reason: "temporal" | "semantic" | "trace";
+	confidence: number;
 }
 
 export class ForensicAnalysisService {
@@ -66,67 +79,210 @@ export class ForensicAnalysisService {
 		}));
 	}
 
-	async correlateIncidents(startTs: number, endTs: number): Promise<void> {
-		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
+	private buildIncidentId(
+		reason: string,
+		key: string,
+		bucketTs: number,
+	): string {
+		const raw = `${reason}:${key}:${bucketTs}`;
+		return `inc_${Bun.hash.xxHash64(raw).toString(16)}`;
+	}
 
-		for (let i = 0; i < clusters.length; i++) {
-			const cluster1 = clusters[i];
-			const payload1 = (cluster1.payload || {}) as Record<string, unknown>;
-			const attributes1 = (payload1.attributes || {}) as Record<
-				string,
-				unknown
-			>;
-			const traceId1 = attributes1.trace_id || attributes1.traceId;
+	private extractTs(payload: Record<string, unknown>): number {
+		const ts = Number(payload.start_ts ?? payload.timestamp ?? 0);
+		return Number.isFinite(ts) ? ts : 0;
+	}
 
-			for (let j = i + 1; j < clusters.length; j++) {
-				const cluster2 = clusters[j];
-				const payload2 = (cluster2.payload || {}) as Record<string, unknown>;
-				const attributes2 = (payload2.attributes || {}) as Record<
-					string,
-					unknown
-				>;
-				const traceId2 = attributes2.trace_id || attributes2.traceId;
+	private accumulate(
+		acc: Map<string, CandidateAccumulator>,
+		incidentId: string,
+		hit: QdrantScoredPoint,
+		reason: "temporal" | "semantic" | "trace",
+		confidence: number,
+		entityKey: string,
+		seedEvidence: Record<string, unknown>,
+	): void {
+		const payload = (hit.payload || {}) as Record<string, unknown>;
+		const ts = this.extractTs(payload);
+		const severity = Number(payload.severity ?? 0);
+		const score = Number(payload.score ?? hit.score ?? 0);
+		const pointId = String(hit.id);
 
-				// 1. Temporal Link
-				const ts1 = Number(payload1?.start_ts ?? payload1?.timestamp ?? 0);
-				const ts2 = Number(payload2?.start_ts ?? payload2?.timestamp ?? 0);
-				const timeDiff = Math.abs(
-					(Number.isFinite(ts1) ? ts1 : 0) - (Number.isFinite(ts2) ? ts2 : 0),
+		const current = acc.get(incidentId);
+		if (!current) {
+			acc.set(incidentId, {
+				memberPointIds: new Set([pointId]),
+				firstSeenTs: ts,
+				lastSeenTs: ts,
+				severityMax: Number.isFinite(severity) ? severity : 0,
+				scoreMax: Number.isFinite(score) ? score : 0,
+				entityKey,
+				evidence: seedEvidence,
+				reason,
+				confidence,
+			});
+			return;
+		}
+
+		current.memberPointIds.add(pointId);
+		current.firstSeenTs = Math.min(current.firstSeenTs, ts);
+		current.lastSeenTs = Math.max(current.lastSeenTs, ts);
+		current.severityMax = Math.max(
+			current.severityMax,
+			Number.isFinite(severity) ? severity : 0,
+		);
+		current.scoreMax = Math.max(
+			current.scoreMax,
+			Number.isFinite(score) ? score : 0,
+		);
+	}
+
+	private buildCandidatesFromHits(
+		hits: QdrantScoredPoint[],
+	): IncidentCandidate[] {
+		const byTrace = new Map<string, QdrantScoredPoint[]>();
+		const byRhythm = new Map<string, QdrantScoredPoint[]>();
+		const byTemporalBucket = new Map<string, QdrantScoredPoint[]>();
+
+		for (const hit of hits) {
+			const payload = (hit.payload || {}) as Record<string, unknown>;
+			const attrs = (payload.attributes || {}) as Record<string, unknown>;
+			const traceIdRaw = attrs.trace_id ?? attrs.traceId;
+			if (typeof traceIdRaw === "string" && traceIdRaw.length > 0) {
+				const arr = byTrace.get(traceIdRaw) ?? [];
+				arr.push(hit);
+				byTrace.set(traceIdRaw, arr);
+			}
+
+			const rhythmHash = payload.rhythm_hash;
+			if (typeof rhythmHash === "string" && rhythmHash.length > 0) {
+				const arr = byRhythm.get(rhythmHash) ?? [];
+				arr.push(hit);
+				byRhythm.set(rhythmHash, arr);
+			}
+
+			const ts = this.extractTs(payload);
+			const bucket = Math.floor(ts / 300);
+			const arr = byTemporalBucket.get(String(bucket)) ?? [];
+			arr.push(hit);
+			byTemporalBucket.set(String(bucket), arr);
+		}
+
+		const acc = new Map<string, CandidateAccumulator>();
+
+		for (const [traceId, grouped] of byTrace.entries()) {
+			if (grouped.length < 2) continue;
+			const incidentId = this.buildIncidentId("trace", traceId, 0);
+			for (const hit of grouped) {
+				this.accumulate(
+					acc,
+					incidentId,
+					hit,
+					"trace",
+					1.0,
+					`trace:${traceId}`,
+					{ trace_id: traceId },
 				);
-
-				if (timeDiff < 3600) {
-					await saveIncidentGraph(
-						`meta_incident_${i}_${j}`,
-						String(cluster1.id),
-						"temporal",
-						80,
-					);
-				}
-
-				// 2. Semantic Link (Rhythm Hash)
-				const rhythmHash1 = payload1?.rhythm_hash;
-				const rhythmHash2 = payload2?.rhythm_hash;
-
-				if (rhythmHash1 && rhythmHash1 === rhythmHash2) {
-					await saveIncidentGraph(
-						`meta_incident_${i}_${j}`,
-						String(cluster2.id),
-						"semantic",
-						85,
-					);
-				}
-
-				// 3. Trace Link (Trace ID)
-				if (traceId1 && traceId2 && traceId1 === traceId2) {
-					await saveIncidentGraph(
-						`meta_incident_${i}_${j}`,
-						String(cluster2.id),
-						"trace",
-						100, // High confidence for explicit trace correlation
-					);
-				}
 			}
 		}
+
+		for (const [rhythmHash, grouped] of byRhythm.entries()) {
+			if (grouped.length < 2) continue;
+			const incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
+			for (const hit of grouped) {
+				this.accumulate(
+					acc,
+					incidentId,
+					hit,
+					"semantic",
+					0.85,
+					`rhythm:${rhythmHash}`,
+					{ rhythm_hash: rhythmHash },
+				);
+			}
+		}
+
+		for (const [bucket, grouped] of byTemporalBucket.entries()) {
+			if (grouped.length < 2) continue;
+			const incidentId = this.buildIncidentId(
+				"temporal",
+				bucket,
+				Number(bucket) * 300,
+			);
+			for (const hit of grouped) {
+				this.accumulate(
+					acc,
+					incidentId,
+					hit,
+					"temporal",
+					0.8,
+					`bucket:${bucket}`,
+					{ temporal_bucket: bucket },
+				);
+			}
+		}
+
+		const candidates: IncidentCandidate[] = [];
+		for (const [incidentId, value] of acc.entries()) {
+			candidates.push({
+				incidentId,
+				memberPointIds: Array.from(value.memberPointIds),
+				reason: value.reason,
+				confidence: value.confidence,
+				firstSeenTs: value.firstSeenTs,
+				lastSeenTs: value.lastSeenTs,
+				severityMax: value.severityMax,
+				scoreMax: value.scoreMax,
+				entityKey: value.entityKey,
+				evidence: value.evidence,
+			});
+		}
+
+		return candidates;
+	}
+
+	async correlateIncidents(startTs: number, endTs: number): Promise<void> {
+		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
+		const candidates = this.buildCandidatesFromHits(clusters);
+
+		for (const candidate of candidates) {
+			for (const pointId of candidate.memberPointIds) {
+				await saveIncidentGraph(
+					candidate.incidentId,
+					pointId,
+					candidate.reason,
+					Math.round(candidate.confidence * 100),
+				);
+			}
+		}
+	}
+
+	async deriveIncidentCandidates(
+		startTs: number,
+		endTs: number,
+		seedEvents: CanonicalTier2Event[] = [],
+	): Promise<IncidentCandidate[]> {
+		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
+		const clusterCandidates = this.buildCandidatesFromHits(clusters);
+
+		// Seed single-event candidates so new events always show up in workflow.
+		const seededCandidates: IncidentCandidate[] = seedEvents.map((event) => ({
+			incidentId: `evt_${event.eventId}`,
+			memberPointIds: [event.eventId],
+			reason: "temporal",
+			confidence: Math.max(0.4, Math.min(1, event.confidence)),
+			firstSeenTs: event.timestamp,
+			lastSeenTs: event.timestamp,
+			severityMax: event.severity,
+			scoreMax: event.score,
+			entityKey: event.entityId,
+			evidence: {
+				event_id: event.eventId,
+				primary_detector: event.primaryDetector,
+			},
+		}));
+
+		return [...clusterCandidates, ...seededCandidates];
 	}
 
 	async getIncidentGraph(metaIncidentId: string) {

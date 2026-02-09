@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 
 const app = new Hono();
-const SERVICE_VERSION = "2.1.0";
-const SIGNAL_SCHEMA_VERSION = 1;
+const SERVICE_VERSION = "2.2.0";
+const SIGNAL_SCHEMA_VERSION = 2;
 
 app.get("/", (c) => {
 	return c.json({

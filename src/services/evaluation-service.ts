@@ -2,6 +2,7 @@ import {
 	getLatestEvaluationMetrics,
 	saveEvaluationMetrics,
 } from "../db/registry";
+import { logger } from "../utils/logger";
 
 export interface GroundTruth {
 	timestamp: number;
@@ -19,7 +20,6 @@ export class EvaluationService {
 	private groundTruthBuffer: GroundTruth[] = [];
 	private detectionBuffer: DetectionResult[] = [];
 
-	// Called by the Simulator
 	recordGroundTruth(truth: GroundTruth) {
 		this.groundTruthBuffer.push(truth);
 		// Keep buffer size manageable
@@ -28,7 +28,6 @@ export class EvaluationService {
 		}
 	}
 
-	// Called by the Anomaly Detection Engine (Tier-1)
 	recordDetection(detection: DetectionResult) {
 		this.detectionBuffer.push(detection);
 		if (this.detectionBuffer.length > 1000) {
@@ -94,9 +93,11 @@ export class EvaluationService {
 			relevantTruths[0]?.scenarioName || "unknown",
 		);
 
-		console.log(
-			`Evaluation [${new Date().toISOString()}]: F1=${f1Score.toFixed(2)} P=${precision.toFixed(2)} R=${recall.toFixed(2)}`,
-		);
+		logger.info("Evaluation metrics updated", {
+			f1: Number(f1Score.toFixed(4)),
+			precision: Number(precision.toFixed(4)),
+			recall: Number(recall.toFixed(4)),
+		});
 	}
 
 	async getHistory(limit: number = 20) {

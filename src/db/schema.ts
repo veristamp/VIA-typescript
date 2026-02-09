@@ -38,7 +38,41 @@ export const incidentGraph = pgTable("incident_graph", {
 	createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Evaluation metrics for simulation framework (new in v2)
+export const tier2Incidents = pgTable("tier2_incidents", {
+	id: serial("id").primaryKey(),
+	incidentId: text("incident_id").notNull().unique(),
+	status: text("status").notNull(),
+	entityKey: text("entity_key").notNull(),
+	firstSeenTs: integer("first_seen_ts").notNull(),
+	lastSeenTs: integer("last_seen_ts").notNull(),
+	severityMax: integer("severity_max").notNull(),
+	scoreMax: integer("score_max").notNull(),
+	confidence: integer("confidence").notNull(),
+	evidence: jsonb("evidence").notNull(),
+	policyVersion: text("policy_version").notNull(),
+	updatedAt: timestamp("updated_at").defaultNow(),
+	createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const tier2Decisions = pgTable("tier2_decisions", {
+	id: serial("id").primaryKey(),
+	incidentId: text("incident_id").notNull(),
+	decision: text("decision").notNull(),
+	reason: text("reason").notNull(),
+	confidence: integer("confidence").notNull(),
+	policyVersion: text("policy_version").notNull(),
+	createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const tier2DeadLetters = pgTable("tier2_dead_letters", {
+	id: serial("id").primaryKey(),
+	eventId: text("event_id").notNull(),
+	reason: text("reason").notNull(),
+	payload: jsonb("payload").notNull(),
+	createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Evaluation metrics for benchmark framework
 export const evaluationMetrics = pgTable("evaluation_metrics", {
 	id: serial("id").primaryKey(),
 	timestamp: integer("timestamp").notNull(),
@@ -53,3 +87,6 @@ export type Schema = typeof schemas.$inferSelect;
 export type Patch = typeof patchRegistry.$inferSelect;
 export type IncidentGraph = typeof incidentGraph.$inferSelect;
 export type EvaluationMetric = typeof evaluationMetrics.$inferSelect;
+export type Tier2Incident = typeof tier2Incidents.$inferSelect;
+export type Tier2Decision = typeof tier2Decisions.$inferSelect;
+export type Tier2DeadLetter = typeof tier2DeadLetters.$inferSelect;

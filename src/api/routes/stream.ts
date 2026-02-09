@@ -1,44 +1,37 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import type { Tier2Service } from "../../services/tier2-service";
+import type { Tier2QueueService } from "../../services/tier2-queue-service";
 import { logger } from "../../utils/logger";
 
 const app = new Hono();
 
 declare module "hono" {
 	interface ContextVariableMap {
-		tier2Service: Tier2Service;
+		tier2QueueService: Tier2QueueService;
 	}
 }
 
-const AnomalyBatchSchema = z.object({
-	signals: z.array(
-		z.union([
-			z.object({
-				t: z.number(),
-				u: z.string(),
-				score: z.number(),
-				severity: z.number(),
-				type: z.number(),
-			}),
-			z.object({
-				schema_version: z.number().int().optional(),
-				entity_hash: z.number(),
-				timestamp: z.number(),
-				score: z.number(),
-				severity: z.number(),
-				primary_detector: z.number().int(),
-				detectors_fired: z.number().int(),
-				confidence: z.number(),
-				detector_scores: z.array(z.number()),
-			}),
-		]),
-	),
+const Tier1V1SignalSchema = z.object({
+	event_id: z.string().min(1),
+	schema_version: z.number().int(),
+	tenant_id: z.string().min(1),
+	entity_hash: z.number(),
+	timestamp: z.number(),
+	score: z.number(),
+	severity: z.number(),
+	primary_detector: z.number().int(),
+	detectors_fired: z.number().int(),
+	confidence: z.number(),
+	detector_scores: z.array(z.number()),
+	attributes: z.record(z.string(), z.unknown()).optional(),
 });
 
-// Endpoint for Gatekeeper to push anomalies
+const AnomalyBatchSchema = z.object({
+	signals: z.array(Tier1V1SignalSchema).min(1),
+});
+
 app.post("/tier2/anomalies", async (c) => {
-	const tier2 = c.get("tier2Service") as Tier2Service;
+	const queue = c.get("tier2QueueService") as Tier2QueueService;
 	const body = await c.req.json().catch(() => null);
 	if (!body) {
 		return c.json({ error: "Invalid JSON body" }, 400);
@@ -52,12 +45,31 @@ app.post("/tier2/anomalies", async (c) => {
 		);
 	}
 
-	logger.info("Accepted anomaly batch", { count: result.data.signals.length });
+	const enqueueResult = queue.enqueue(result.data.signals);
+	if (!enqueueResult.accepted) {
+		logger.warn("Rejected anomaly batch", {
+			eventId: enqueueResult.eventId,
+			reason: enqueueResult.reason,
+		});
+		return c.json(
+			{
+				status: "rejected",
+				event_id: enqueueResult.eventId,
+				reason: enqueueResult.reason,
+			},
+			429,
+		);
+	}
 
-	// Async processing
-	c.executionCtx.waitUntil(tier2.processAnomalyBatch(result.data.signals));
+	logger.info("Accepted anomaly batch", {
+		eventId: enqueueResult.eventId,
+		count: result.data.signals.length,
+	});
 
-	return c.json({ status: "accepted" });
+	return c.json({
+		status: "accepted",
+		event_id: enqueueResult.eventId,
+	});
 });
 
 export const streamRoutes = app;
