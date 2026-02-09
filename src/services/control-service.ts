@@ -4,6 +4,7 @@ import {
 	getAllRules,
 	patchAnomaly,
 } from "../db/registry";
+import { logger } from "../utils/logger";
 
 export interface SuppressRequest {
 	rhythmHash: string;
@@ -19,15 +20,22 @@ export interface PatchRequest {
 export class ControlService {
 	private suppressionCache: Map<string, number> = new Map();
 	private patchRegistry: Set<string> = new Set();
+	private ready: Promise<void>;
 
 	constructor() {
-		this.loadPatches();
+		this.ready = this.loadPatches();
+	}
+
+	async initialize(): Promise<void> {
+		await this.ready;
 	}
 
 	private async loadPatches(): Promise<void> {
 		const patches = await getActivePatches();
 		this.patchRegistry = new Set(patches.map((p) => p.rhythmHash));
-		console.log(`Loaded ${this.patchRegistry.size} active patches`);
+		logger.info("Loaded active control patches", {
+			count: this.patchRegistry.size,
+		});
 	}
 
 	async suppressAnomaly(
@@ -36,9 +44,7 @@ export class ControlService {
 	): Promise<void> {
 		const expiryTs = Math.floor(Date.now() / 1000) + durationSec;
 		this.suppressionCache.set(rhythmHash, expiryTs);
-		console.log(
-			`Suppressed rhythm_hash '${rhythmHash}' for ${durationSec} seconds`,
-		);
+		logger.info("Suppressed anomaly", { rhythmHash, durationSec, expiryTs });
 	}
 
 	async patchAnomaly(
@@ -48,18 +54,18 @@ export class ControlService {
 	): Promise<void> {
 		await patchAnomaly(rhythmHash, reason);
 		this.patchRegistry.add(rhythmHash);
-		console.log(`Patched rhythm_hash '${rhythmHash}' as ALLOW_LIST`);
+		logger.info("Patched anomaly", { rhythmHash, reason });
 	}
 
 	async deletePatch(rhythmHash: string): Promise<void> {
 		await deletePatch(rhythmHash);
 		this.patchRegistry.delete(rhythmHash);
-		console.log(`Deactivated patch for rhythm_hash '${rhythmHash}'`);
+		logger.info("Deleted patch", { rhythmHash });
 	}
 
 	async deleteSuppression(rhythmHash: string): Promise<void> {
 		this.suppressionCache.delete(rhythmHash);
-		console.log(`Removed suppression for rhythm_hash '${rhythmHash}'`);
+		logger.info("Deleted suppression", { rhythmHash });
 	}
 
 	isSuppressedOrPatched(rhythmHash: string): boolean {

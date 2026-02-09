@@ -28,15 +28,20 @@ const SaveSchemaRequestSchema = z.object({
 		fields: z.array(z.any()),
 		id: z.number().optional(),
 	}),
-	behavioral: z.object({
-		frequency: z.record(z.string(), z.number()),
-		cardinality: z.record(z.string(), z.number()),
-	}).nullable(),
+	behavioral: z
+		.object({
+			frequency: z.record(z.string(), z.number()),
+			cardinality: z.record(z.string(), z.number()),
+		})
+		.nullable(),
 });
 
 app.post("/detect", async (c) => {
 	const schemaService = c.get("schemaService") as SchemaService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = DetectSchemaRequestSchema.safeParse(body);
 	if (!result.success) {
@@ -58,7 +63,10 @@ app.post("/detect", async (c) => {
 
 app.post("/save", async (c) => {
 	const schemaService = c.get("schemaService") as SchemaService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = SaveSchemaRequestSchema.safeParse(body);
 	if (!result.success) {

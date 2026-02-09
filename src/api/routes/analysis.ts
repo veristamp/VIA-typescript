@@ -29,7 +29,10 @@ app.post("/clusters", async (c) => {
 	const forensicAnalysisService = c.get(
 		"forensicAnalysisService",
 	) as ForensicAnalysisService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = FindClustersRequestSchema.safeParse(body);
 	if (!result.success) {
@@ -51,7 +54,10 @@ app.post("/triage", async (c) => {
 	const forensicAnalysisService = c.get(
 		"forensicAnalysisService",
 	) as ForensicAnalysisService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = TriageRequestSchema.safeParse(body);
 	if (!result.success) {
@@ -74,7 +80,10 @@ app.post("/correlate", async (c) => {
 	const forensicAnalysisService = c.get(
 		"forensicAnalysisService",
 	) as ForensicAnalysisService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = FindClustersRequestSchema.safeParse(body);
 	if (!result.success) {

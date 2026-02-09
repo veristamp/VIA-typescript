@@ -196,6 +196,16 @@ impl ThompsonBandit {
             .zip(self.betas.iter().cloned())
             .collect()
     }
+
+    /// Restore alpha/beta parameters from checkpointed state.
+    pub fn set_params(&mut self, alphas: &[f64], betas: &[f64]) -> Result<(), &'static str> {
+        if alphas.len() != self.num_arms || betas.len() != self.num_arms {
+            return Err("invalid bandit parameter length");
+        }
+        self.alphas.clone_from_slice(alphas);
+        self.betas.clone_from_slice(betas);
+        Ok(())
+    }
 }
 
 /// Adaptive Ensemble that learns optimal detector weights
@@ -226,10 +236,9 @@ pub struct AdaptiveEnsemble {
 }
 
 /// Detection result from individual detector
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct DetectorOutput {
     pub detector_id: usize,
-    pub detector_name: String,
     pub score: f64,
     pub confidence: f64,
     pub signal_type: u8,
@@ -267,9 +276,9 @@ impl AdaptiveEnsemble {
     }
 
     /// Combine detector outputs into ensemble score
-    pub fn combine(&mut self, outputs: &[DetectorOutput]) -> (f64, f64, Vec<f64>) {
+    pub fn combine(&mut self, outputs: &[DetectorOutput]) -> (f64, f64) {
         if outputs.is_empty() {
-            return (0.0, 0.0, vec![]);
+            return (0.0, 0.0);
         }
 
         self.update_count += 1;
@@ -277,7 +286,7 @@ impl AdaptiveEnsemble {
         // Calculate weighted ensemble score
         let mut weighted_score = 0.0;
         let mut total_weight = 0.0;
-        let mut individual_scores = vec![0.0; self.num_detectors];
+        let mut triggered = 0usize;
 
         for output in outputs {
             if output.detector_id < self.num_detectors {
@@ -285,7 +294,9 @@ impl AdaptiveEnsemble {
                 let weighted = output.score * weight * output.confidence;
                 weighted_score += weighted;
                 total_weight += weight * output.confidence;
-                individual_scores[output.detector_id] = output.score;
+                if output.score > 0.5 {
+                    triggered += 1;
+                }
             }
         }
 
@@ -296,12 +307,12 @@ impl AdaptiveEnsemble {
         };
 
         // Calculate ensemble confidence
-        let confidence = self.calculate_confidence(outputs, &individual_scores);
+        let confidence = self.calculate_confidence(outputs, triggered);
 
         // Update score history and adaptive threshold
         self.update_threshold(ensemble_score);
 
-        (ensemble_score, confidence, individual_scores)
+        (ensemble_score, confidence)
     }
 
     /// Update weights based on ground truth feedback
@@ -382,14 +393,13 @@ impl AdaptiveEnsemble {
     }
 
     /// Calculate ensemble confidence
-    fn calculate_confidence(&self, outputs: &[DetectorOutput], individual_scores: &[f64]) -> f64 {
+    fn calculate_confidence(&self, outputs: &[DetectorOutput], triggered: usize) -> f64 {
         if outputs.is_empty() {
             return 0.0;
         }
 
         // Agreement between detectors
-        let num_triggered = individual_scores.iter().filter(|&&s| s > 0.5).count();
-        let agreement = num_triggered as f64 / self.num_detectors as f64;
+        let agreement = triggered as f64 / self.num_detectors as f64;
 
         // Weighted average of individual confidences
         let mut total_confidence = 0.0;
@@ -434,6 +444,45 @@ impl AdaptiveEnsemble {
             .cloned()
             .zip(self.current_weights.iter().cloned())
             .collect()
+    }
+
+    /// Current normalized detector weights.
+    pub fn current_weights(&self) -> &[f64] {
+        &self.current_weights
+    }
+
+    /// Restore full adaptive state from a checkpoint.
+    pub fn restore_state(
+        &mut self,
+        weights: &[f64],
+        alphas: &[f64],
+        betas: &[f64],
+        total_samples: u64,
+    ) -> Result<(), &'static str> {
+        if weights.len() != self.num_detectors {
+            return Err("invalid weight length");
+        }
+        self.current_weights.clone_from_slice(weights);
+        let sum: f64 = self.current_weights.iter().sum();
+        if sum <= 0.0 {
+            return Err("invalid weight sum");
+        }
+        self.current_weights.iter_mut().for_each(|w| *w /= sum);
+        self.bandit.set_params(alphas, betas)?;
+        self.update_count = total_samples;
+        Ok(())
+    }
+
+    /// Export bandit alpha/beta arrays.
+    pub fn bandit_params(&self) -> (Vec<f64>, Vec<f64>) {
+        let params = self.bandit.get_params();
+        let mut alphas = Vec::with_capacity(params.len());
+        let mut betas = Vec::with_capacity(params.len());
+        for (a, b) in params {
+            alphas.push(a);
+            betas.push(b);
+        }
+        (alphas, betas)
     }
 
     /// Get performance statistics
@@ -584,28 +633,25 @@ mod tests {
         let outputs = vec![
             DetectorOutput {
                 detector_id: 0,
-                detector_name: "A".to_string(),
                 score: 0.8,
                 confidence: 0.9,
                 signal_type: 1,
             },
             DetectorOutput {
                 detector_id: 1,
-                detector_name: "B".to_string(),
                 score: 0.3,
                 confidence: 0.7,
                 signal_type: 2,
             },
         ];
 
-        let (score, confidence, individual) = ensemble.combine(&outputs);
+        let (score, confidence) = ensemble.combine(&outputs);
 
         assert!(score > 0.0, "Should have positive score");
         assert!(
             confidence >= 0.0 && confidence <= 1.0,
             "Confidence should be normalized"
         );
-        assert_eq!(individual.len(), 2);
     }
 
     #[test]
@@ -616,14 +662,12 @@ mod tests {
         let outputs = vec![
             DetectorOutput {
                 detector_id: 0,
-                detector_name: "A".to_string(),
                 score: 0.9,
                 confidence: 0.9,
                 signal_type: 1,
             },
             DetectorOutput {
                 detector_id: 1,
-                detector_name: "B".to_string(),
                 score: 0.1,
                 confidence: 0.7,
                 signal_type: 2,

@@ -283,6 +283,14 @@ impl<P> ProfileRegistry<P> {
 
     /// Find the best candidate for eviction
     fn find_eviction_candidate(&self) -> Option<u64> {
+        if !self.config.enable_lru {
+            return self
+                .profiles
+                .iter()
+                .min_by(|a, b| a.1.meta.created_at.cmp(&b.1.meta.created_at))
+                .map(|(&h, _)| h);
+        }
+
         // Simple LRU: find oldest access with low event count
         let mut best_candidate: Option<(u64, f64)> = None;
 

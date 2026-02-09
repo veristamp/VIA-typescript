@@ -1,5 +1,6 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { settings } from "../config/settings";
+import { logger } from "../utils/logger";
 
 export interface QdrantPoint {
 	id: string;
@@ -18,6 +19,10 @@ export interface QdrantScoredPoint {
 	payload?: Record<string, unknown>;
 	version?: number;
 }
+
+type PayloadIndexFieldSchema = Parameters<
+	QdrantClient["createPayloadIndex"]
+>[1]["field_schema"];
 
 export class QdrantService {
 	private client: QdrantClient;
@@ -71,30 +76,69 @@ export class QdrantService {
 		return collections;
 	}
 
+	private isNotFoundError(error: unknown): boolean {
+		const message = String(error ?? "").toLowerCase();
+		return message.includes("404") || message.includes("not found");
+	}
+
+	private async ensurePayloadIndex(
+		collection: string,
+		field_name: string,
+		field_schema: PayloadIndexFieldSchema,
+	): Promise<void> {
+		try {
+			await this.client.createPayloadIndex(collection, {
+				field_name,
+				field_schema,
+			});
+		} catch (error) {
+			// Index creation is idempotent from our perspective; skip duplicates.
+			logger.warn("Skipping payload index creation", {
+				collection,
+				field_name,
+				error: String(error),
+			});
+		}
+	}
+
+	private async ensureTier1Collection(): Promise<void> {
+		try {
+			await this.client.getCollection(this.tier1CollectionPrefix);
+			return;
+		} catch (error) {
+			if (!this.isNotFoundError(error)) {
+				throw error;
+			}
+		}
+
+		logger.info("Creating Tier-1 collection", {
+			collection: this.tier1CollectionPrefix,
+		});
+		await this.client.createCollection(this.tier1CollectionPrefix, {
+			vectors: {
+				size: this.tier1Dim,
+				distance: "Dot",
+			},
+			quantization_config: {
+				binary: {
+					always_ram: true,
+				},
+			},
+			replication_factor: 1,
+			shard_number: 1,
+		});
+	}
+
 	async setupCollections(): Promise<void> {
-		console.log("Setting up Tier 1 collection with Binary Quantization...");
+		logger.info("Ensuring Qdrant collections");
 
 		try {
-			await this.client.createCollection(this.tier1CollectionPrefix, {
-				vectors: {
-					size: this.tier1Dim,
-					distance: "Dot",
-				},
-				quantization_config: {
-					binary: {
-						always_ram: true,
-					},
-				},
-				replication_factor: 1,
-				shard_number: 1,
-			});
-
-			await this.client.createPayloadIndex(this.tier1CollectionPrefix, {
-				field_name: "ts",
-				field_schema: "integer",
-			});
-
-			console.log("Tier 1 collection created successfully");
+			await this.ensureTier1Collection();
+			await this.ensurePayloadIndex(
+				this.tier1CollectionPrefix,
+				"ts",
+				"integer",
+			);
 
 			const todayTs = Math.floor(Date.now() / 1000);
 			const todayCollection = this.getDailyCollectionName(
@@ -103,7 +147,7 @@ export class QdrantService {
 			);
 			await this.ensureDailyTier2Collection(todayCollection);
 		} catch (error) {
-			console.error("Error setting up collections:", error);
+			logger.error("Error setting up collections", error);
 			throw error;
 		}
 	}
@@ -112,12 +156,19 @@ export class QdrantService {
 		collectionName: string,
 	): Promise<void> {
 		try {
-			const collectionExists = await this.client.getCollection(collectionName);
-			if (collectionExists) {
-				return;
+			await this.client.getCollection(collectionName);
+			return;
+		} catch (error) {
+			if (!this.isNotFoundError(error)) {
+				logger.error("Error checking collection existence", error);
+				throw error;
 			}
+		}
 
-			console.log(`Creating daily Tier 2 collection: ${collectionName}`);
+		try {
+			logger.info("Creating daily Tier-2 collection", {
+				collection: collectionName,
+			});
 
 			await this.client.createCollection(collectionName, {
 				vectors: {
@@ -147,31 +198,17 @@ export class QdrantService {
 				},
 			});
 
-			await this.client.createPayloadIndex(collectionName, {
-				field_name: "start_ts",
-				field_schema: "integer",
-			});
-
-			await this.client.createPayloadIndex(collectionName, {
-				field_name: "service",
-				field_schema: "keyword",
-			});
-
-			await this.client.createPayloadIndex(collectionName, {
-				field_name: "rhythm_hash",
-				field_schema: "keyword",
-			});
-
-			await this.client.createPayloadIndex(collectionName, {
-				field_name: "body",
-				field_schema: {
-					type: "text",
-					tokenizer: "word",
-					lowercase: true,
-				},
+			await this.ensurePayloadIndex(collectionName, "start_ts", "integer");
+			await this.ensurePayloadIndex(collectionName, "timestamp", "integer");
+			await this.ensurePayloadIndex(collectionName, "service", "keyword");
+			await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
+			await this.ensurePayloadIndex(collectionName, "body", {
+				type: "text",
+				tokenizer: "word",
+				lowercase: true,
 			});
 		} catch (error) {
-			console.error(`Error creating collection ${collectionName}:`, error);
+			logger.error(`Error creating collection ${collectionName}`, error);
 			throw error;
 		}
 	}
@@ -202,7 +239,12 @@ export class QdrantService {
 		const eventsByCollection = new Map<string, Tier2Event[]>();
 
 		for (const event of events) {
-			const startTs = event.payload.start_ts as number;
+			const startTsRaw = (event.payload.start_ts ??
+				event.payload.timestamp ??
+				Math.floor(Date.now() / 1000)) as number;
+			const startTs = Number.isFinite(startTsRaw)
+				? Math.floor(startTsRaw)
+				: Math.floor(Date.now() / 1000);
 			const collectionName = this.getDailyCollectionName(
 				this.tier2CollectionPrefix,
 				startTs,
@@ -266,7 +308,7 @@ export class QdrantService {
 
 			return points;
 		} catch (error) {
-			console.error("Error getting points from Tier 1:", error);
+			logger.error("Error getting points from Tier 1", error);
 			return [];
 		}
 	}
@@ -300,7 +342,7 @@ export class QdrantService {
 
 			return points;
 		} catch (error) {
-			console.error("Error getting historical baseline:", error);
+			logger.error("Error getting historical baseline", error);
 			return [];
 		}
 	}
@@ -354,7 +396,9 @@ export class QdrantService {
 		);
 
 		try {
-			const results = await Promise.all(searchPromises);
+			const results = await Promise.all(
+				searchPromises.map((promise) => promise.catch(() => [])),
+			);
 			const allHits = results.flatMap((r) => r || []);
 
 			const grouped = new Map<string, QdrantScoredPoint>();
@@ -367,7 +411,7 @@ export class QdrantService {
 
 			return Array.from(grouped.values());
 		} catch (error) {
-			console.error("Error finding Tier 2 clusters:", error);
+			logger.error("Error finding Tier 2 clusters", error);
 			return [];
 		}
 	}
@@ -399,14 +443,16 @@ export class QdrantService {
 		);
 
 		try {
-			const results = await Promise.all(recommendPromises);
+			const results = await Promise.all(
+				recommendPromises.map((promise) => promise.catch(() => [])),
+			);
 			const allHits = results.flatMap((r) => r || []);
 
 			allHits.sort((a, b) => (b.score || 0) - (a.score || 0));
 
 			return allHits.slice(0, 50) as QdrantScoredPoint[];
 		} catch (error) {
-			console.error("Error triaging similar events:", error);
+			logger.error("Error triaging similar events", error);
 			return [];
 		}
 	}
@@ -420,14 +466,18 @@ export class QdrantService {
 			});
 
 			if (!response.ok) {
-				console.warn(`Embedding service unavailable, using fallback`);
+				logger.warn("Embedding service unavailable, using fallback", {
+					status: response.status,
+				});
 				return this.generateFallbackVector(text);
 			}
 
 			const data = (await response.json()) as { embeddings?: number[][] };
 			return data.embeddings?.[0] || this.generateFallbackVector(text);
-		} catch {
-			console.warn(`Embedding request failed, using fallback`);
+		} catch (error) {
+			logger.warn("Embedding request failed, using fallback", {
+				error: String(error),
+			});
 			return this.generateFallbackVector(text);
 		}
 	}
@@ -451,14 +501,18 @@ export class QdrantService {
 		text: string,
 	): Promise<{ indices: number[]; values: number[] }> {
 		const words = text.toLowerCase().split(/\s+/);
+		const freq = new Map<string, number>();
+		for (const word of words) {
+			freq.set(word, (freq.get(word) ?? 0) + 1);
+		}
 		const indices: number[] = [];
 		const values: number[] = [];
 
-		for (const word of words) {
+		for (const [word, count] of freq.entries()) {
 			const hash = Bun.hash.xxHash64(word);
 			const hashValue = Number(hash & 0xffn);
 			indices.push(hashValue % 1000);
-			values.push(1 + words.filter((w) => w === word).length / words.length);
+			values.push(1 + count / Math.max(words.length, 1));
 		}
 
 		return { indices, values };

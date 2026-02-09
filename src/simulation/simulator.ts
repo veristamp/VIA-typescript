@@ -1,12 +1,12 @@
-import type { IngestionService } from "../services/ingestion-service";
 import type { EvaluationService } from "../services/evaluation-service";
+import type { IngestionService } from "../services/ingestion-service";
 import type { Scenario } from "./scenario";
 import { CredentialStuffingScenario } from "./scenarios/credential-stuffing";
 
 export class Simulator {
 	private scenarios: Map<string, Scenario> = new Map();
 	private activeScenario: Scenario | null = null;
-	private intervalId: Timer | null = null;
+	private intervalId: ReturnType<typeof setInterval> | null = null;
 	private ingestionService: IngestionService;
 	private evaluationService: EvaluationService;
 	private tick: number = 0;
@@ -35,7 +35,9 @@ export class Simulator {
 
 	startScenario(name: string) {
 		if (this.activeScenario) {
-			throw new Error(`Scenario ${this.activeScenario.getName()} is already running`);
+			throw new Error(
+				`Scenario ${this.activeScenario.getName()} is already running`,
+			);
 		}
 
 		const scenario = this.scenarios.get(name);
@@ -76,9 +78,13 @@ export class Simulator {
 		}, 1000); // 1 second tick
 	}
 
-	private convertToOtlp(simLog: Record<string, unknown>): Record<string, unknown> {
+	private convertToOtlp(
+		simLog: Record<string, unknown>,
+	): Record<string, unknown> {
 		const timestamp = (simLog.timestamp as number) * 1_000_000_000; // Nano
-		const resourceAttrs = (simLog.resource as any)?.attributes || {};
+		const resourceAttrs = ((
+			simLog.resource as { attributes?: Record<string, unknown> }
+		)?.attributes ?? {}) as Record<string, unknown>;
 		const formattedAttrs = Object.entries(resourceAttrs).map(([k, v]) => ({
 			key: k,
 			value: { stringValue: String(v) },
@@ -109,7 +115,9 @@ export class Simulator {
 
 	stopScenario() {
 		if (this.activeScenario) {
-			console.log(`Stopping simulation scenario: ${this.activeScenario.getName()}`);
+			console.log(
+				`Stopping simulation scenario: ${this.activeScenario.getName()}`,
+			);
 			this.activeScenario.stop();
 			this.activeScenario = null;
 		}
@@ -119,11 +127,11 @@ export class Simulator {
 		}
 	}
 
-    getStatus() {
-        return {
-            isRunning: !!this.activeScenario,
-            activeScenario: this.activeScenario?.getName() || null,
-            tick: this.tick
-        };
-    }
+	getStatus() {
+		return {
+			isRunning: !!this.activeScenario,
+			activeScenario: this.activeScenario?.getName() || null,
+			tick: this.tick,
+		};
+	}
 }

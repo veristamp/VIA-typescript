@@ -10,8 +10,11 @@ declare module "hono" {
 }
 
 app.get("/metrics", async (c) => {
-	const evaluationService = c.get("evaluationService");
-	const limit = Number(c.req.query("limit") || "20");
+	const evaluationService = c.get("evaluationService") as EvaluationService;
+	const parsed = Number(c.req.query("limit") ?? "20");
+	const limit = Number.isFinite(parsed)
+		? Math.min(Math.max(parsed, 1), 500)
+		: 20;
 	const metrics = await evaluationService.getHistory(limit);
 	return c.json({ metrics });
 });

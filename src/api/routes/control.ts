@@ -25,7 +25,10 @@ const PatchRequestSchema = z.object({
 
 app.post("/suppress", async (c) => {
 	const controlService = c.get("controlService") as ControlService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = SuppressRequestSchema.safeParse(body);
 	if (!result.success) {
@@ -45,7 +48,10 @@ app.post("/suppress", async (c) => {
 
 app.post("/patch", async (c) => {
 	const controlService = c.get("controlService") as ControlService;
-	const body = await c.req.json();
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
 	const result = PatchRequestSchema.safeParse(body);
 	if (!result.success) {

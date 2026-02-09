@@ -22,9 +22,10 @@ use once_cell::sync::Lazy;
 use prometheus::{Counter, Encoder, Gauge, Histogram, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::sync::Arc;
 use std::thread;
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use via_core::{
     engine::AnomalyProfile,
@@ -32,6 +33,9 @@ use via_core::{
     registry::{ProfileRegistry, RegistryConfig},
     signal::{AnomalySignal, NUM_DETECTORS},
 };
+
+const GATEKEEPER_VERSION: &str = "2.1.0";
+const SIGNAL_SCHEMA_VERSION: u16 = 1;
 
 // ============================================================================
 // METRICS
@@ -53,6 +57,56 @@ pub static DROPPED_TOTAL: Lazy<Counter> = Lazy::new(|| {
     let c = Counter::new(
         "via_dropped_total",
         "Total events dropped due to backpressure",
+    )
+    .unwrap();
+    prometheus::register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static DROPPED_INGEST_QUEUE: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "via_dropped_ingest_queue_total",
+        "Events dropped at ingest queue boundary",
+    )
+    .unwrap();
+    prometheus::register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static DROPPED_SHARD_QUEUE: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "via_dropped_shard_queue_total",
+        "Events dropped while routing to shard queue",
+    )
+    .unwrap();
+    prometheus::register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static DROPPED_PERSISTENCE_QUEUE: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "via_dropped_persistence_queue_total",
+        "Anomalies dropped when persistence queue is full",
+    )
+    .unwrap();
+    prometheus::register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static DROPPED_FEEDBACK_QUEUE: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "via_dropped_feedback_queue_total",
+        "Feedback events dropped due to feedback queue pressure",
+    )
+    .unwrap();
+    prometheus::register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static FEEDBACK_PROFILE_MISS: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "via_feedback_profile_miss_total",
+        "Feedback events received but profile was not found",
     )
     .unwrap();
     prometheus::register(Box::new(c.clone())).unwrap();
@@ -117,6 +171,7 @@ pub struct InternalEvent {
 /// Anomaly output sent to persistence
 #[derive(Debug, Clone, Serialize)]
 pub struct AnomalyOutput {
+    pub schema_version: u16,
     pub entity_hash: u64,
     pub timestamp: u64,
     pub score: f64,
@@ -130,6 +185,7 @@ pub struct AnomalyOutput {
 impl From<AnomalySignal> for AnomalyOutput {
     fn from(signal: AnomalySignal) -> Self {
         Self {
+            schema_version: SIGNAL_SCHEMA_VERSION,
             entity_hash: signal.entity_hash,
             timestamp: signal.timestamp,
             score: signal.ensemble_score,
@@ -169,8 +225,7 @@ fn default_confidence() -> f32 {
 #[derive(Clone)]
 struct AppState {
     ingest_tx: tokio::sync::mpsc::Sender<IngestPacket>,
-    feedback_tx: Sender<FeedbackRequest>,
-    _shard_count: usize,
+    feedback_txs: Arc<Vec<Sender<FeedbackRequest>>>,
 }
 
 thread_local! {
@@ -282,7 +337,10 @@ impl ShardWorker {
 
                         // Offload serialization to persistence thread
                         let output: AnomalyOutput = signal.clone().into();
-                        let _ = self.persistence_tx.try_send(output);
+                        if self.persistence_tx.try_send(output).is_err() {
+                            DROPPED_PERSISTENCE_QUEUE.inc();
+                            DROPPED_TOTAL.inc();
+                        }
 
                         // Log critical anomalies
                         if signal.severity as u8 >= 3 {
@@ -366,6 +424,8 @@ impl ShardWorker {
                 was_tp = feedback.was_true_positive,
                 "Applied feedback"
             );
+        } else {
+            FEEDBACK_PROFILE_MISS.inc();
         }
     }
 }
@@ -382,11 +442,17 @@ impl PersistenceManager {
             .name("via-persistence".into())
             .spawn(move || {
                 let mut current_hour = chrono::Local::now().format("%Y%m%d%H").to_string();
-                let file = std::fs::OpenOptions::new()
+                let file = match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(format!("anomalies_{}.jsonl", current_hour))
-                    .expect("Failed to open anomaly log");
+                {
+                    Ok(file) => file,
+                    Err(e) => {
+                        error!(error = %e, "Failed to open anomaly log file");
+                        return;
+                    }
+                };
 
                 let mut buffer = std::io::BufWriter::with_capacity(128 * 1024, file);
 
@@ -397,11 +463,17 @@ impl PersistenceManager {
                     if now_hour != current_hour {
                         let _ = buffer.flush();
                         current_hour = now_hour;
-                        let new_file = std::fs::OpenOptions::new()
+                        let new_file = match std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(format!("anomalies_{}.jsonl", current_hour))
-                            .expect("Failed to rotate log");
+                        {
+                            Ok(file) => file,
+                            Err(e) => {
+                                error!(error = %e, "Failed to rotate anomaly log file");
+                                continue;
+                            }
+                        };
                         buffer = std::io::BufWriter::with_capacity(128 * 1024, new_file);
                     }
 
@@ -460,6 +532,7 @@ impl IngestionLayer {
         };
 
         if shard_txs[shard_id].try_send(internal).is_err() {
+            DROPPED_SHARD_QUEUE.inc();
             DROPPED_TOTAL.inc();
         }
     }
@@ -479,6 +552,7 @@ async fn ingest(
         .try_send(IngestPacket::Single(event))
         .is_err()
     {
+        DROPPED_INGEST_QUEUE.inc();
         DROPPED_TOTAL.inc();
         return StatusCode::SERVICE_UNAVAILABLE;
     }
@@ -497,6 +571,7 @@ async fn ingest_batch(
         .try_send(IngestPacket::Batch(events))
         .is_err()
     {
+        DROPPED_INGEST_QUEUE.inc();
         DROPPED_TOTAL.inc();
         return StatusCode::SERVICE_UNAVAILABLE;
     }
@@ -508,19 +583,32 @@ async fn feedback_handler(
     State(state): State<AppState>,
     Json(feedback): Json<FeedbackRequest>,
 ) -> StatusCode {
-    // We send via the shared feedback channel; shard workers poll it
-    match state.feedback_tx.try_send(feedback) {
+    let shard_count = state.feedback_txs.len();
+    if shard_count == 0 {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    let shard_id = (feedback.entity_hash as usize) % shard_count;
+
+    match state.feedback_txs[shard_id].try_send(feedback) {
         Ok(_) => StatusCode::ACCEPTED,
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+        Err(_) => {
+            DROPPED_FEEDBACK_QUEUE.inc();
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     }
 }
 
-async fn metrics_handler() -> String {
+async fn metrics_handler() -> impl IntoResponse {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
+    if encoder.encode(&metric_families, &mut buffer).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "metrics encode failed").into_response();
+    }
+    match String::from_utf8(buffer) {
+        Ok(body) => (StatusCode::OK, body).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "metrics utf8 failed").into_response(),
+    }
 }
 
 async fn health_handler() -> &'static str {
@@ -530,13 +618,15 @@ async fn health_handler() -> &'static str {
 #[derive(Serialize)]
 struct StatsResponse {
     version: &'static str,
+    signal_schema_version: u16,
     detectors: u8,
     status: &'static str,
 }
 
 async fn stats_handler() -> Json<StatsResponse> {
     Json(StatsResponse {
-        version: "2.0.0",
+        version: GATEKEEPER_VERSION,
+        signal_schema_version: SIGNAL_SCHEMA_VERSION,
         detectors: NUM_DETECTORS as u8,
         status: "operational",
     })
@@ -550,16 +640,27 @@ async fn stats_handler() -> Json<StatsResponse> {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    if let Err(e) = run().await {
+        error!(error = %e, "Gatekeeper exited with error");
+    }
+}
+
+async fn run() -> Result<(), String> {
     info!("🚀 Initializing VIA Gatekeeper v2.0 (SOTA Adaptive Ensemble Edition)");
 
     // Initialize metrics
     let _ = &*INGEST_TOTAL;
     let _ = &*ANOMALY_TOTAL;
     let _ = &*DROPPED_TOTAL;
+    let _ = &*DROPPED_INGEST_QUEUE;
+    let _ = &*DROPPED_SHARD_QUEUE;
+    let _ = &*DROPPED_PERSISTENCE_QUEUE;
+    let _ = &*DROPPED_FEEDBACK_QUEUE;
     let _ = &*PROCESSING_LATENCY;
     let _ = &*ACTIVE_PROFILES;
     let _ = &*EVICTIONS_TOTAL;
     let _ = &*FEEDBACK_RECEIVED;
+    let _ = &*FEEDBACK_PROFILE_MISS;
 
     let shard_count = thread::available_parallelism()
         .map(|n| n.get())
@@ -581,36 +682,34 @@ async fn main() {
     let (p_tx, p_rx) = bounded::<AnomalyOutput>(200_000);
     let persistence_handle = PersistenceManager::spawn(p_rx);
 
-    // Feedback channel (shared across shards)
-    let (feedback_tx, feedback_rx) = bounded::<FeedbackRequest>(10_000);
-
     // Shard workers
     let mut txs = Vec::new();
+    let mut feedback_txs = Vec::new();
     let mut worker_handles = Vec::new();
 
     for i in 0..shard_count {
         let (tx, rx) = bounded::<InternalEvent>(100_000);
+        let (feedback_tx, feedback_rx) = bounded::<FeedbackRequest>(10_000);
         txs.push(tx);
+        feedback_txs.push(feedback_tx);
         worker_handles.push(ShardWorker::spawn(
             i,
             rx,
             p_tx.clone(),
-            feedback_rx.clone(),
+            feedback_rx,
             registry_config.clone(),
         ));
     }
 
     drop(p_tx);
-    drop(feedback_rx);
 
     // Decoupled Ingestion Channel
     let (ingest_tx, ingest_rx) = tokio::sync::mpsc::channel::<IngestPacket>(100_000);
-    let _ingestion_handle = IngestionLayer::spawn(ingest_rx, txs);
+    let ingestion_handle = IngestionLayer::spawn(ingest_rx, txs);
 
     let state = AppState {
         ingest_tx,
-        feedback_tx,
-        _shard_count: shard_count,
+        feedback_txs: Arc::new(feedback_txs),
     };
 
     let app = Router::new()
@@ -623,7 +722,9 @@ async fn main() {
         .with_state(state.clone());
 
     let addr = "0.0.0.0:3000";
-    let listener = TcpListener::bind(addr).await.expect("Failed to bind port");
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("failed to bind {}: {}", addr, e))?;
 
     info!(addr, "Gatekeeper listening.");
     info!("Endpoints:");
@@ -636,22 +737,30 @@ async fn main() {
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install CTRL+C handler");
+            if tokio::signal::ctrl_c().await.is_err() {
+                error!("failed to install CTRL+C handler");
+            }
             info!("Shutting down... (Waiting for queues to drain)");
         })
         .await
-        .expect("Server crash");
+        .map_err(|e| format!("server crash: {}", e))?;
 
     drop(state);
     info!("Ingest channels closed.");
 
+    let _ = ingestion_handle.await;
+
     for handle in worker_handles {
-        handle.join().expect("Shard worker panicked");
+        if handle.join().is_err() {
+            return Err("shard worker panicked".to_string());
+        }
     }
     info!("All shards drained and stopped.");
 
-    persistence_handle.join().expect("Persistence panicked");
+    if persistence_handle.join().is_err() {
+        return Err("persistence worker panicked".to_string());
+    }
     info!("Persistence flushed. Goodbye.");
+
+    Ok(())
 }

@@ -1,74 +1,73 @@
-import { Router } from "express";
-import { RustSimulationEngine } from "../../rust-bridge";
+import { Hono } from "hono";
 import { z } from "zod";
+import { RustSimulationEngine } from "../../rust-bridge";
 
-const router = Router();
+const app = new Hono();
 const simulation = new RustSimulationEngine();
 
-// Start with some baseline traffic
+// Start with baseline traffic.
 simulation.addNormalTraffic(50.0);
 
 const ScenarioSchema = z.object({
-  type: z.enum([
-    "normal", 
-    "memory_leak", 
-    "cpu_spike", 
-    "credential_stuffing", 
-    "sql_injection", 
-    "port_scan"
-  ]),
-  intensity: z.number().positive(),
+	type: z.enum([
+		"normal",
+		"memory_leak",
+		"cpu_spike",
+		"credential_stuffing",
+		"sql_injection",
+		"port_scan",
+	]),
+	intensity: z.number().positive(),
 });
 
-// GET /simulation/state
-// Returns the latest batch of logs from the simulation
-router.get("/tick", (req, res) => {
-    // 100ms tick
-    const logs = simulation.tick(100_000_000); 
-    res.setHeader("Content-Type", "application/json");
-    res.send(logs);
+app.get("/tick", (c) => {
+	const logs = simulation.tick(100_000_000);
+	return c.body(logs, 200, { "content-type": "application/json" });
 });
 
-// POST /simulation/scenario
-// Adds a new scenario to the running simulation
-router.post("/scenario", (req, res) => {
-    const result = ScenarioSchema.safeParse(req.body);
-    if (!result.success) {
-        return res.status(400).json(result.error);
-    }
+app.post("/scenario", async (c) => {
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
 
-    const { type, intensity } = result.data;
+	const result = ScenarioSchema.safeParse(body);
+	if (!result.success) {
+		return c.json({ error: "Invalid request", details: result.error }, 400);
+	}
 
-    switch (type) {
-        case "normal":
-            simulation.addNormalTraffic(intensity);
-            break;
-        case "memory_leak":
-            simulation.addMemoryLeak(intensity);
-            break;
-        case "cpu_spike":
-            simulation.addCpuSpike(intensity); // 0.0 - 1.0
-            break;
-        case "credential_stuffing":
-            simulation.addCredentialStuffing(intensity);
-            break;
-        case "sql_injection":
-            simulation.addSqlInjection(intensity);
-            break;
-        case "port_scan":
-            simulation.addPortScan(intensity);
-            break;
-    }
+	const { type, intensity } = result.data;
 
-    res.json({ message: `Scenario ${type} added with intensity ${intensity}` });
+	switch (type) {
+		case "normal":
+			simulation.addNormalTraffic(intensity);
+			break;
+		case "memory_leak":
+			simulation.addMemoryLeak(intensity);
+			break;
+		case "cpu_spike":
+			simulation.addCpuSpike(intensity);
+			break;
+		case "credential_stuffing":
+			simulation.addCredentialStuffing(intensity);
+			break;
+		case "sql_injection":
+			simulation.addSqlInjection(intensity);
+			break;
+		case "port_scan":
+			simulation.addPortScan(intensity);
+			break;
+	}
+
+	return c.json({
+		message: `Scenario ${type} added with intensity ${intensity}`,
+	});
 });
 
-// POST /simulation/reset
-router.post("/reset", (req, res) => {
-    simulation.reset();
-    // Re-add baseline
-    simulation.addNormalTraffic(50.0);
-    res.json({ message: "Simulation reset to baseline" });
+app.post("/reset", (c) => {
+	simulation.reset();
+	simulation.addNormalTraffic(50.0);
+	return c.json({ message: "Simulation reset to baseline" });
 });
 
-export default router;
+export const simulationRoutes = app;

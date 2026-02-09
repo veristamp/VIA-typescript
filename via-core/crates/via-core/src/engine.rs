@@ -744,6 +744,9 @@ pub struct ProfileConfig {
     pub hist_decay: f64,
     pub confidence_threshold: f64,
     pub warmup_events: usize,
+    pub min_detector_score_for_anomaly: f64,
+    pub min_ensemble_score_for_anomaly: f64,
+    pub use_adaptive_ensemble_threshold: bool,
 }
 
 impl Default for ProfileConfig {
@@ -759,6 +762,9 @@ impl Default for ProfileConfig {
             hist_decay: 0.999,
             confidence_threshold: 0.5,
             warmup_events: 100,
+            min_detector_score_for_anomaly: 0.10,
+            min_ensemble_score_for_anomaly: 0.10,
+            use_adaptive_ensemble_threshold: true,
         }
     }
 }
@@ -919,7 +925,8 @@ impl AnomalyProfile {
         };
 
         // === STAGE 1: Run all detectors ===
-        let mut detector_outputs: Vec<DetectorOutput> = Vec::with_capacity(NUM_DETECTORS);
+        let mut detector_outputs = [DetectorOutput::default(); NUM_DETECTORS];
+        let mut output_count = 0usize;
         let mut detector_scores = [DetectorScore::default(); NUM_DETECTORS];
 
         let n = self.event_count as f64;
@@ -938,6 +945,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_dist,
@@ -945,6 +953,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_card,
@@ -952,6 +961,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_burst,
@@ -959,6 +969,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_spectral,
@@ -966,6 +977,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_cp,
@@ -973,6 +985,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_rrcf,
@@ -980,6 +993,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_ms,
@@ -987,6 +1001,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_behavioral,
@@ -994,6 +1009,7 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
         Self::run_detector(
             &mut self.v_drift,
@@ -1001,15 +1017,22 @@ impl AnomalyProfile {
             is_very_normal,
             &mut detector_scores,
             &mut detector_outputs,
+            &mut output_count,
         );
 
         // === STAGE 2: Combine with AdaptiveEnsemble ===
-        let (ensemble_score, ensemble_confidence, weights) =
-            self.ensemble.combine(&detector_outputs);
+        let (ensemble_score, ensemble_confidence) =
+            self.ensemble.combine(&detector_outputs[..output_count]);
 
         // Convert weights to fixed array
         let mut weight_array = [0.1f32; NUM_DETECTORS];
-        for (i, w) in weights.iter().enumerate().take(NUM_DETECTORS) {
+        for (i, w) in self
+            .ensemble
+            .current_weights()
+            .iter()
+            .enumerate()
+            .take(NUM_DETECTORS)
+        {
             weight_array[i] = *w as f32;
         }
 
@@ -1035,12 +1058,16 @@ impl AnomalyProfile {
         // Build the signal
         let severity = Severity::from_score(ensemble_score);
 
-        // TIER 1 DESIGN: MAXIMUM RECALL - Catch everything for Tier 2 to review
-        // Reduced thresholds significantly to ensure we don't miss anomalies.
-        // If ANY detector shows elevated activity (>= 0.10), flag it.
-        let any_detector_fired = detector_scores.iter().any(|s| s.fired && s.score >= 0.10);
+        // Hybrid decision: detector floor + ensemble score floor + adaptive ensemble threshold.
+        let any_detector_fired = detector_scores
+            .iter()
+            .any(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly);
+        let adaptive_trigger = self.config.use_adaptive_ensemble_threshold
+            && self.ensemble.is_anomaly(ensemble_score)
+            && ensemble_confidence >= self.config.confidence_threshold;
+        let score_floor_trigger = ensemble_score >= self.config.min_ensemble_score_for_anomaly;
 
-        let is_anomaly = any_detector_fired || ensemble_score >= 0.10;
+        let is_anomaly = any_detector_fired || adaptive_trigger || score_floor_trigger;
 
         AnomalySignal {
             entity_hash: unique_id_hash,
@@ -1065,7 +1092,8 @@ impl AnomalyProfile {
         ctx: &SignalContext,
         is_very_normal: bool,
         scores: &mut [DetectorScore; NUM_DETECTORS],
-        outputs: &mut Vec<DetectorOutput>,
+        outputs: &mut [DetectorOutput; NUM_DETECTORS],
+        output_count: &mut usize,
     ) {
         let detector_id = detector.id() as usize;
 
@@ -1074,13 +1102,13 @@ impl AnomalyProfile {
             || detector_id == DetectorId::Spectral as usize;
 
         if is_heavy && is_very_normal {
-            outputs.push(DetectorOutput {
+            outputs[*output_count] = DetectorOutput {
                 detector_id,
-                detector_name: detector.name().to_string(),
                 score: 0.0,
                 confidence: 1.0,
                 signal_type: 0,
-            });
+            };
+            *output_count += 1;
             return;
         }
 
@@ -1093,21 +1121,21 @@ impl AnomalyProfile {
                 ctx.value,
             );
 
-            outputs.push(DetectorOutput {
+            outputs[*output_count] = DetectorOutput {
                 detector_id,
-                detector_name: detector.name().to_string(),
                 score: result.score,
                 confidence: result.confidence,
                 signal_type: result.signal_type,
-            });
+            };
+            *output_count += 1;
         } else {
-            outputs.push(DetectorOutput {
+            outputs[*output_count] = DetectorOutput {
                 detector_id,
-                detector_name: detector.name().to_string(),
                 score: 0.0,
                 confidence: 1.0,
                 signal_type: 0,
-            });
+            };
+            *output_count += 1;
         }
     }
 
@@ -1129,19 +1157,11 @@ impl AnomalyProfile {
                 .detector_scores
                 .iter()
                 .enumerate()
-                .map(|(i, &score)| {
-                    let name = DetectorId::from_u8(i as u8)
-                        .map(|d| d.name())
-                        .unwrap_or("Unknown")
-                        .to_string();
-
-                    DetectorOutput {
-                        detector_id: i,
-                        detector_name: name,
-                        score: score as f64,
-                        confidence: 0.8,
-                        signal_type: i as u8,
-                    }
+                .map(|(i, &score)| DetectorOutput {
+                    detector_id: i,
+                    score: score as f64,
+                    confidence: 0.8,
+                    signal_type: i as u8,
                 })
                 .collect();
 
@@ -1155,11 +1175,7 @@ impl AnomalyProfile {
 
     /// Get current ensemble weights
     pub fn get_weights(&self) -> Vec<f64> {
-        self.ensemble
-            .get_weights()
-            .into_iter()
-            .map(|(_, w)| w)
-            .collect()
+        self.ensemble.current_weights().to_vec()
     }
 
     /// Get detector statistics (Refactored for static fields)
@@ -1203,6 +1219,7 @@ impl Checkpointable for AnomalyProfile {
     fn to_checkpoint(&self) -> Vec<u8> {
         // Serialize ensemble state
         let weights = self.get_weights();
+        let (alphas, betas) = self.ensemble.bandit_params();
         let checkpoint = EnsembleCheckpoint {
             weights: {
                 let mut arr = [0.1; NUM_DETECTORS];
@@ -1211,8 +1228,20 @@ impl Checkpointable for AnomalyProfile {
                 }
                 arr
             },
-            alpha: [1.0; NUM_DETECTORS], // TODO: expose from AdaptiveEnsemble
-            beta: [1.0; NUM_DETECTORS],
+            alpha: {
+                let mut arr = [1.0; NUM_DETECTORS];
+                for (i, a) in alphas.iter().enumerate().take(NUM_DETECTORS) {
+                    arr[i] = *a;
+                }
+                arr
+            },
+            beta: {
+                let mut arr = [1.0; NUM_DETECTORS];
+                for (i, b) in betas.iter().enumerate().take(NUM_DETECTORS) {
+                    arr[i] = *b;
+                }
+                arr
+            },
             total_samples: self.event_count,
         };
 
@@ -1225,7 +1254,15 @@ impl Checkpointable for AnomalyProfile {
 
         let mut profile = AnomalyProfile::default();
         profile.event_count = checkpoint.total_samples;
-        // TODO: Restore ensemble weights
+        profile
+            .ensemble
+            .restore_state(
+                &checkpoint.weights,
+                &checkpoint.alpha,
+                &checkpoint.beta,
+                checkpoint.total_samples,
+            )
+            .map_err(|e| CheckpointError::InvalidState(e.to_string()))?;
 
         Ok(profile)
     }
@@ -1322,13 +1359,28 @@ mod tests {
 
     #[test]
     fn test_checkpointable() {
-        let profile = AnomalyProfile::default();
+        let mut profile = AnomalyProfile::default();
+        for i in 0..120 {
+            let _ = profile.process_with_hash(i * 1_000_000, 42, 100.0 + i as f64 * 0.2);
+        }
+
         let checkpoint = profile.to_checkpoint();
 
         assert!(!checkpoint.is_empty());
 
         let original_count = profile.event_count();
+        let original_weights = profile.get_weights();
         let restored = AnomalyProfile::from_checkpoint(&checkpoint).unwrap();
         assert_eq!(restored.event_count(), original_count);
+        assert_eq!(restored.get_weights().len(), original_weights.len());
+
+        for (a, b) in restored.get_weights().iter().zip(original_weights.iter()) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "restored weight mismatch: {} vs {}",
+                a,
+                b
+            );
+        }
     }
 }

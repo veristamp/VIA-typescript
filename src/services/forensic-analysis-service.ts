@@ -72,18 +72,26 @@ export class ForensicAnalysisService {
 		for (let i = 0; i < clusters.length; i++) {
 			const cluster1 = clusters[i];
 			const payload1 = (cluster1.payload || {}) as Record<string, unknown>;
-			const attributes1 = (payload1.attributes || {}) as Record<string, unknown>;
+			const attributes1 = (payload1.attributes || {}) as Record<
+				string,
+				unknown
+			>;
 			const traceId1 = attributes1.trace_id || attributes1.traceId;
 
 			for (let j = i + 1; j < clusters.length; j++) {
 				const cluster2 = clusters[j];
 				const payload2 = (cluster2.payload || {}) as Record<string, unknown>;
-				const attributes2 = (payload2.attributes || {}) as Record<string, unknown>;
+				const attributes2 = (payload2.attributes || {}) as Record<
+					string,
+					unknown
+				>;
 				const traceId2 = attributes2.trace_id || attributes2.traceId;
 
 				// 1. Temporal Link
+				const ts1 = Number(payload1?.start_ts ?? payload1?.timestamp ?? 0);
+				const ts2 = Number(payload2?.start_ts ?? payload2?.timestamp ?? 0);
 				const timeDiff = Math.abs(
-					(payload1?.start_ts as number) - (payload2?.start_ts as number),
+					(Number.isFinite(ts1) ? ts1 : 0) - (Number.isFinite(ts2) ? ts2 : 0),
 				);
 
 				if (timeDiff < 3600) {
@@ -91,7 +99,7 @@ export class ForensicAnalysisService {
 						`meta_incident_${i}_${j}`,
 						String(cluster1.id),
 						"temporal",
-						0.8,
+						80,
 					);
 				}
 
@@ -104,7 +112,7 @@ export class ForensicAnalysisService {
 						`meta_incident_${i}_${j}`,
 						String(cluster2.id),
 						"semantic",
-						0.85,
+						85,
 					);
 				}
 
@@ -114,7 +122,7 @@ export class ForensicAnalysisService {
 						`meta_incident_${i}_${j}`,
 						String(cluster2.id),
 						"trace",
-						1.0, // High confidence for explicit trace correlation
+						100, // High confidence for explicit trace correlation
 					);
 				}
 			}
