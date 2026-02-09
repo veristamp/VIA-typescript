@@ -172,7 +172,7 @@ pub struct InternalEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct AnomalyOutput {
     pub schema_version: u16,
-    pub entity_hash: u64,
+    pub entity_hash: String,
     pub timestamp: u64,
     pub score: f64,
     pub severity: u8,
@@ -186,7 +186,7 @@ impl From<AnomalySignal> for AnomalyOutput {
     fn from(signal: AnomalySignal) -> Self {
         Self {
             schema_version: SIGNAL_SCHEMA_VERSION,
-            entity_hash: signal.entity_hash,
+            entity_hash: signal.entity_hash.to_string(),
             timestamp: signal.timestamp,
             score: signal.ensemble_score,
             severity: signal.severity as u8,

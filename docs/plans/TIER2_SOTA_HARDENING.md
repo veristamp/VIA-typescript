@@ -40,7 +40,6 @@ Tier-2 is now designed as an event-driven intelligence and incident-management p
 - Startup now ensures required registry tables exist.
 - Qdrant indexing expanded for incident workflow fields:
   - `event_id`
-  - `tenant_id` (`is_tenant`)
   - `entity_id`
 - Graceful startup/shutdown includes queue lifecycle.
 

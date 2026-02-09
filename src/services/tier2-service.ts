@@ -5,11 +5,10 @@ import type { IncidentService } from "./incident-service";
 import type { QdrantService } from "./qdrant-service";
 
 export interface Tier1AnomalySignalV1 {
-	event_id: string;
+	event_id?: string;
 	schema_version: number;
-	tenant_id: string;
-	entity_hash: number;
-	timestamp: number;
+	entity_hash: string;
+	timestamp: number | string;
 	score: number;
 	severity: number;
 	primary_detector: number;
@@ -28,21 +27,34 @@ export class Tier2Service {
 		private incidents: IncidentService,
 	) {}
 
-	private normalizeToUnixSeconds(ts: number): number {
-		if (!Number.isFinite(ts) || ts <= 0) {
+	private normalizeToUnixSeconds(ts: number | string): number {
+		const numericTs = typeof ts === "string" ? Number(ts) : ts;
+		if (!Number.isFinite(numericTs) || numericTs <= 0) {
 			return Math.floor(Date.now() / 1000);
 		}
-		if (ts > 1e15) return Math.floor(ts / 1e9);
-		if (ts > 1e12) return Math.floor(ts / 1e3);
-		return Math.floor(ts);
+		if (numericTs > 1e15) return Math.floor(numericTs / 1e9);
+		if (numericTs > 1e12) return Math.floor(numericTs / 1e3);
+		return Math.floor(numericTs);
+	}
+
+	private computeEventId(
+		signal: IncomingAnomalySignal,
+		timestamp: number,
+	): string {
+		if (typeof signal.event_id === "string" && signal.event_id.length > 0) {
+			return signal.event_id;
+		}
+		const seed =
+			`${signal.entity_hash}:${timestamp}:` +
+			`${signal.primary_detector}:${signal.score.toFixed(6)}:${signal.severity.toFixed(6)}`;
+		return Bun.hash.xxHash64(seed).toString(16);
 	}
 
 	private normalizeSignal(signal: IncomingAnomalySignal): CanonicalTier2Event {
 		const timestamp = this.normalizeToUnixSeconds(signal.timestamp);
 		return {
-			eventId: signal.event_id,
+			eventId: this.computeEventId(signal, timestamp),
 			schemaVersion: signal.schema_version,
-			tenantId: signal.tenant_id,
 			entityHash: signal.entity_hash,
 			entityId: `hash:${signal.entity_hash}`,
 			timestamp,
@@ -81,7 +93,6 @@ export class Tier2Service {
 					event_id: sig.eventId,
 					entity_type: "anomaly",
 					schema_version: sig.schemaVersion,
-					tenant_id: sig.tenantId,
 					entity_hash: sig.entityHash,
 					entity_id: sig.entityId,
 					start_ts: sig.timestamp,

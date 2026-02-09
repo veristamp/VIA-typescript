@@ -12,11 +12,10 @@ declare module "hono" {
 }
 
 const Tier1V1SignalSchema = z.object({
-	event_id: z.string().min(1),
+	event_id: z.string().min(1).optional(),
 	schema_version: z.number().int(),
-	tenant_id: z.string().min(1),
-	entity_hash: z.number(),
-	timestamp: z.number(),
+	entity_hash: z.string().min(1),
+	timestamp: z.union([z.number(), z.string().min(1)]),
 	score: z.number(),
 	severity: z.number(),
 	primary_detector: z.number().int(),

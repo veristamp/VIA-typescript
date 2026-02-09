@@ -23,8 +23,7 @@ export interface BatchSummary {
 export interface CanonicalTier2Event {
 	eventId: string;
 	schemaVersion: number;
-	tenantId: string;
-	entityHash: number | null;
+	entityHash: string;
 	entityId: string;
 	timestamp: number;
 	score: number;
