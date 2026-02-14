@@ -7,6 +7,7 @@
 //! This engine produces `AnomalySignal` with full detector breakdown and attribution.
 
 use crate::algo::{
+    AdaptiveThreshold,
     adaptive_ensemble::{AdaptiveEnsemble, DetectorOutput},
     adaptive_threshold::presets,
     behavioral_fingerprint::BehavioralFingerprintDetector,
@@ -19,13 +20,12 @@ use crate::algo::{
     multi_scale::MultiScaleDetector,
     rrcf::RRCFDetector,
     spectral_residual::SpectralResidual,
-    AdaptiveThreshold,
 };
 use crate::checkpoint::{CheckpointError, Checkpointable, EnsembleCheckpoint};
 use crate::feedback::{FeedbackEvent, LearningUpdate};
 use crate::policy::runtime as policy_runtime;
 use crate::signal::{
-    AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, Severity, NUM_DETECTORS,
+    AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, NUM_DETECTORS, Severity,
 };
 
 // ============================================================================
@@ -417,11 +417,7 @@ impl Detector for SpectralDetector {
             let trend = if self.last_values.len() >= 2 {
                 let first = self.last_values.first().unwrap_or(&ctx.value);
                 let last = self.last_values.last().unwrap_or(&ctx.value);
-                if last > first {
-                    "spike"
-                } else {
-                    "drop"
-                }
+                if last > first { "spike" } else { "drop" }
             } else {
                 "anomaly"
             };
@@ -1342,7 +1338,7 @@ impl AnomalyProfile {
 mod tests {
     use super::*;
     use crate::policy::{
-        runtime as policy_runtime, PatternRule, PolicyAction, PolicyDefaults, PolicySnapshot,
+        PatternRule, PolicyAction, PolicyDefaults, PolicySnapshot, runtime as policy_runtime,
     };
 
     #[test]
