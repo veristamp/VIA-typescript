@@ -29,12 +29,14 @@ use tracing::{error, info, warn};
 
 use via_core::{
     engine::AnomalyProfile,
-    feedback::{FeedbackEvent, FeedbackSource},
+    feedback::{FeedbackEvent, FeedbackLabelClass, FeedbackSource},
+    forwarder::{ForwarderConfig, Tier1SignalV1, Tier2Forwarder},
+    policy::{PolicySnapshot, runtime as policy_runtime},
     registry::{ProfileRegistry, RegistryConfig},
     signal::{AnomalySignal, NUM_DETECTORS},
 };
 
-const GATEKEEPER_VERSION: &str = "2.1.0";
+const GATEKEEPER_VERSION: &str = "2.2.0";
 const SIGNAL_SCHEMA_VERSION: u16 = 1;
 
 // ============================================================================
@@ -204,10 +206,25 @@ pub enum IngestPacket {
     Batch(Vec<IngestEvent>),
 }
 
-/// Feedback request from Tier-2
-#[derive(Debug, Clone, Deserialize)]
-pub struct FeedbackRequest {
+/// Internal Feedback Request (Resolved)
+#[derive(Debug, Clone)]
+pub struct InternalFeedback {
     pub entity_hash: u64,
+    pub signal_timestamp: u64,
+    pub was_true_positive: bool,
+    pub detector_scores: Vec<f32>,
+    pub source: String,
+    pub confidence: f32,
+    pub label_class: Option<String>,
+    pub pattern_id: Option<String>,
+    pub feedback_latency_ms: Option<u64>,
+}
+
+/// Feedback request from Tier-2 API
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiFeedbackRequest {
+    pub entity_id: Option<String>,
+    pub entity_hash: Option<u64>,
     pub signal_timestamp: u64,
     pub was_true_positive: bool,
     pub detector_scores: Vec<f32>,
@@ -215,6 +232,12 @@ pub struct FeedbackRequest {
     pub source: String,
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+    #[serde(default)]
+    pub label_class: Option<String>,
+    #[serde(default)]
+    pub pattern_id: Option<String>,
+    #[serde(default)]
+    pub feedback_latency_ms: Option<u64>,
 }
 
 fn default_confidence() -> f32 {
@@ -225,7 +248,8 @@ fn default_confidence() -> f32 {
 #[derive(Clone)]
 struct AppState {
     ingest_tx: tokio::sync::mpsc::Sender<IngestPacket>,
-    feedback_txs: Arc<Vec<Sender<FeedbackRequest>>>,
+    feedback_txs: Arc<Vec<Sender<InternalFeedback>>>,
+    forwarder: Option<Arc<Tier2Forwarder>>,
 }
 
 thread_local! {
@@ -272,7 +296,8 @@ struct ShardWorker {
     rx: Receiver<InternalEvent>,
     registry: ProfileRegistry<AnomalyProfile>,
     persistence_tx: Sender<AnomalyOutput>,
-    feedback_rx: Receiver<FeedbackRequest>,
+    feedback_rx: Receiver<InternalFeedback>,
+    forwarder: Option<Arc<Tier2Forwarder>>,
 }
 
 impl ShardWorker {
@@ -280,8 +305,9 @@ impl ShardWorker {
         id: usize,
         rx: Receiver<InternalEvent>,
         p_tx: Sender<AnomalyOutput>,
-        feedback_rx: Receiver<FeedbackRequest>,
+        feedback_rx: Receiver<InternalFeedback>,
         registry_config: RegistryConfig,
+        forwarder: Option<Arc<Tier2Forwarder>>,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name(format!("via-shard-{}", id))
@@ -292,6 +318,7 @@ impl ShardWorker {
                     registry: ProfileRegistry::with_config(registry_config),
                     persistence_tx: p_tx,
                     feedback_rx,
+                    forwarder,
                 };
                 worker.run();
                 info!(shard = id, "Shard worker stopped.");
@@ -335,6 +362,13 @@ impl ShardWorker {
                     if signal.is_anomaly {
                         ANOMALY_TOTAL.inc();
 
+                        // Forward to Tier-2 if forwarder is configured
+                        if let Some(ref forwarder) = self.forwarder {
+                            if forwarder.try_send(signal.clone()).is_err() {
+                                warn!(shard = self.id, "Tier-2 forwarder queue full");
+                            }
+                        }
+
                         // Offload serialization to persistence thread
                         let output: AnomalyOutput = signal.clone().into();
                         if self.persistence_tx.try_send(output).is_err() {
@@ -375,7 +409,7 @@ impl ShardWorker {
         }
     }
 
-    fn process_feedback(&mut self, feedback: FeedbackRequest) {
+    fn process_feedback(&mut self, feedback: InternalFeedback) {
         FEEDBACK_RECEIVED.inc();
 
         // Get profile (if exists)
@@ -398,7 +432,7 @@ impl ShardWorker {
                 _ => FeedbackSource::Timeout,
             };
 
-            let event = if feedback.was_true_positive {
+            let mut event = if feedback.was_true_positive {
                 FeedbackEvent::true_positive(
                     feedback.entity_hash,
                     feedback.signal_timestamp,
@@ -415,6 +449,18 @@ impl ShardWorker {
                     feedback.confidence,
                 )
             };
+
+            event.label_class = match feedback.label_class.as_deref() {
+                Some("benign_known") => FeedbackLabelClass::BenignKnown,
+                Some("attack_known") => FeedbackLabelClass::AttackKnown,
+                Some("novel") => FeedbackLabelClass::Novel,
+                _ => FeedbackLabelClass::Uncertain,
+            };
+            event.pattern_id = feedback
+                .pattern_id
+                .as_deref()
+                .map(|p| xxhash_rust::xxh3::xxh3_64(p.as_bytes()));
+            event.feedback_latency_ms = feedback.feedback_latency_ms.unwrap_or(0);
 
             profile.apply_feedback(&[event]);
 
@@ -581,15 +627,38 @@ async fn ingest_batch(
 
 async fn feedback_handler(
     State(state): State<AppState>,
-    Json(feedback): Json<FeedbackRequest>,
+    Json(feedback): Json<ApiFeedbackRequest>,
 ) -> StatusCode {
     let shard_count = state.feedback_txs.len();
     if shard_count == 0 {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
-    let shard_id = (feedback.entity_hash as usize) % shard_count;
 
-    match state.feedback_txs[shard_id].try_send(feedback) {
+    // Resolve hash
+    let hash = if let Some(h) = feedback.entity_hash {
+        h
+    } else if let Some(ref id) = feedback.entity_id {
+        xxhash_rust::xxh3::xxh3_64(id.as_bytes())
+    } else {
+        return StatusCode::BAD_REQUEST;
+    };
+
+    let shard_id = (hash as usize) % shard_count;
+
+    // Convert to internal format
+    let internal = InternalFeedback {
+        entity_hash: hash,
+        signal_timestamp: feedback.signal_timestamp,
+        was_true_positive: feedback.was_true_positive,
+        detector_scores: feedback.detector_scores,
+        source: feedback.source,
+        confidence: feedback.confidence,
+        label_class: feedback.label_class,
+        pattern_id: feedback.pattern_id,
+        feedback_latency_ms: feedback.feedback_latency_ms,
+    };
+
+    match state.feedback_txs[shard_id].try_send(internal) {
         Ok(_) => StatusCode::ACCEPTED,
         Err(_) => {
             DROPPED_FEEDBACK_QUEUE.inc();
@@ -620,6 +689,7 @@ struct StatsResponse {
     version: &'static str,
     signal_schema_version: u16,
     detectors: u8,
+    policy_version: String,
     status: &'static str,
 }
 
@@ -628,8 +698,41 @@ async fn stats_handler() -> Json<StatsResponse> {
         version: GATEKEEPER_VERSION,
         signal_schema_version: SIGNAL_SCHEMA_VERSION,
         detectors: NUM_DETECTORS as u8,
+        policy_version: policy_runtime().current_version(),
         status: "operational",
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyRollbackRequest {
+    target_version: String,
+}
+
+async fn policy_snapshot_handler(Json(snapshot): Json<PolicySnapshot>) -> StatusCode {
+    policy_runtime().install_snapshot(snapshot);
+    StatusCode::ACCEPTED
+}
+
+#[derive(Serialize)]
+struct PolicyVersionResponse {
+    policy_version: String,
+}
+
+async fn policy_version_handler() -> Json<PolicyVersionResponse> {
+    Json(PolicyVersionResponse {
+        policy_version: policy_runtime().current_version(),
+    })
+}
+
+async fn policy_rollback_handler(Json(req): Json<PolicyRollbackRequest>) -> StatusCode {
+    if req.target_version.trim().is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    if policy_runtime().rollback_to_version(&req.target_version) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 // ============================================================================
@@ -646,7 +749,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    info!("🚀 Initializing VIA Gatekeeper v2.0 (SOTA Adaptive Ensemble Edition)");
+    info!("🚀 Initializing VIA Gatekeeper v2.1 (SOTA Adaptive Ensemble Edition)");
 
     // Initialize metrics
     let _ = &*INGEST_TOTAL;
@@ -682,6 +785,17 @@ async fn run() -> Result<(), String> {
     let (p_tx, p_rx) = bounded::<AnomalyOutput>(200_000);
     let persistence_handle = PersistenceManager::spawn(p_rx);
 
+    // Tier-2 Forwarder (optional, enabled via environment variable)
+    let tier2_url = std::env::var("TIER2_URL").ok();
+    let forwarder: Option<Arc<Tier2Forwarder>> = tier2_url.as_ref().map(|url| {
+        let config = ForwarderConfig {
+            tier2_url: url.clone(),
+            ..Default::default()
+        };
+        info!(tier2_url = %url, "Tier-2 forwarding enabled");
+        Arc::new(Tier2Forwarder::new(config))
+    });
+
     // Shard workers
     let mut txs = Vec::new();
     let mut feedback_txs = Vec::new();
@@ -689,7 +803,7 @@ async fn run() -> Result<(), String> {
 
     for i in 0..shard_count {
         let (tx, rx) = bounded::<InternalEvent>(100_000);
-        let (feedback_tx, feedback_rx) = bounded::<FeedbackRequest>(10_000);
+        let (feedback_tx, feedback_rx) = bounded::<InternalFeedback>(10_000);
         txs.push(tx);
         feedback_txs.push(feedback_tx);
         worker_handles.push(ShardWorker::spawn(
@@ -698,6 +812,7 @@ async fn run() -> Result<(), String> {
             p_tx.clone(),
             feedback_rx,
             registry_config.clone(),
+            forwarder.clone(),
         ));
     }
 
@@ -710,12 +825,16 @@ async fn run() -> Result<(), String> {
     let state = AppState {
         ingest_tx,
         feedback_txs: Arc::new(feedback_txs),
+        forwarder,
     };
 
     let app = Router::new()
         .route("/ingest", post(ingest))
         .route("/ingest/batch", post(ingest_batch))
         .route("/feedback", post(feedback_handler))
+        .route("/policy/snapshot", post(policy_snapshot_handler))
+        .route("/policy/version", get(policy_version_handler))
+        .route("/policy/rollback", post(policy_rollback_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
@@ -730,7 +849,12 @@ async fn run() -> Result<(), String> {
     info!("Endpoints:");
     info!("  POST /ingest       - Single event ingestion");
     info!("  POST /ingest/batch - Batch event ingestion");
-    info!("  POST /feedback     - Tier-2 feedback for weight learning");
+    info!(
+        "  POST /feedback     - Tier-2 feedback for weight learning (accepts 'entity_id' string or 'entity_hash')"
+    );
+    info!("  POST /policy/snapshot - Install compiled Tier-2 policy snapshot");
+    info!("  GET  /policy/version  - Current runtime policy version");
+    info!("  POST /policy/rollback - Roll back to a previous policy version");
     info!("  GET  /metrics      - Prometheus metrics");
     info!("  GET  /health       - Health check");
     info!("  GET  /stats        - System stats");

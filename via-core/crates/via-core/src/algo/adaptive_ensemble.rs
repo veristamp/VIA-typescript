@@ -8,12 +8,148 @@
 //! - Precision/Recall tracking per detector
 //! - Automatic weight adaptation based on feedback
 //! - Confidence-based ensemble voting
+//! - P² algorithm for O(1) percentile estimation
 //!
 //! Reference: Contextual Bandits for Online Learning
 
+use crate::signal::NUM_DETECTORS;
 use rand_distr::Distribution;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct P2QuantileEstimator {
+    quantile: f64,
+    positions: [f64; 5],
+    heights: [f64; 5],
+    desired_positions: [f64; 5],
+    count: u64,
+    initialized: bool,
+    init_values: Vec<f64>,
+}
+
+impl P2QuantileEstimator {
+    fn new(quantile: f64) -> Self {
+        Self {
+            quantile: quantile.clamp(0.0, 1.0),
+            positions: [0.0; 5],
+            heights: [f64::NAN; 5],
+            desired_positions: [0.0; 5],
+            count: 0,
+            initialized: false,
+            init_values: Vec::with_capacity(5),
+        }
+    }
+
+    fn update(&mut self, value: f64) {
+        self.count += 1;
+
+        if !self.initialized {
+            self.init_values.push(value);
+            if self.init_values.len() >= 5 {
+                self.init_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                for i in 0..5 {
+                    self.heights[i] = self.init_values[i];
+                    self.positions[i] = i as f64;
+                }
+                self.update_desired_positions();
+                self.initialized = true;
+            }
+            return;
+        }
+
+        let _k = if value < self.heights[0] {
+            self.heights[0] = value;
+            0
+        } else if value >= self.heights[4] {
+            self.heights[4] = value;
+            3
+        } else {
+            let mut found = 3;
+            for i in 0..4 {
+                if value < self.heights[i + 1] {
+                    found = i;
+                    break;
+                }
+            }
+            for i in (found + 1)..5 {
+                self.positions[i] += 1.0;
+            }
+            found
+        };
+
+        self.update_desired_positions();
+        self.adjust_positions();
+    }
+
+    fn update_desired_positions(&mut self) {
+        let n = self.count as f64;
+        let q = self.quantile;
+        self.desired_positions[0] = 0.0;
+        self.desired_positions[1] = 2.0 * n * q;
+        self.desired_positions[2] = n * q;
+        self.desired_positions[3] = n * (1.0 + q);
+        self.desired_positions[4] = n;
+    }
+
+    fn adjust_positions(&mut self) {
+        for i in 1..4 {
+            let d = self.desired_positions[i] - self.positions[i];
+            if (d >= 1.0 && self.positions[i + 1] - self.positions[i] > 1.0)
+                || (d <= -1.0 && self.positions[i - 1] - self.positions[i] < -1.0)
+            {
+                let sign = d.signum();
+                let new_height = self.parabolic(i, sign);
+                if self.heights[i - 1] < new_height && new_height < self.heights[i + 1] {
+                    self.heights[i] = new_height;
+                } else {
+                    self.heights[i] = self.linear(i, sign);
+                }
+                self.positions[i] += sign;
+            }
+        }
+    }
+
+    fn parabolic(&self, i: usize, d: f64) -> f64 {
+        let h = &self.heights;
+        let p = &self.positions;
+
+        let numerator = (p[i] - p[i - 1] + d) * (h[i + 1] - h[i]) / (p[i + 1] - p[i])
+            + (p[i + 1] - p[i] - d) * (h[i] - h[i - 1]) / (p[i] - p[i - 1]);
+        let denominator = p[i + 1] - p[i - 1];
+
+        if denominator.abs() < 1e-10 {
+            return h[i];
+        }
+
+        h[i] + d / denominator * numerator
+    }
+
+    fn linear(&self, i: usize, d: f64) -> f64 {
+        let h = &self.heights;
+        let p = &self.positions;
+
+        if d > 0.0 {
+            h[i] + (h[i + 1] - h[i]) / (p[i + 1] - p[i])
+        } else {
+            h[i] + (h[i - 1] - h[i]) / (p[i - 1] - p[i])
+        }
+    }
+
+    fn get_quantile(&self) -> f64 {
+        if !self.initialized {
+            if self.init_values.is_empty() {
+                return 0.5;
+            }
+            let mut sorted = self.init_values.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let idx = ((sorted.len() - 1) as f64 * self.quantile) as usize;
+            sorted[idx.min(sorted.len() - 1)]
+        } else {
+            self.heights[2]
+        }
+    }
+}
 
 /// Performance metrics for a single detector
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -120,6 +256,8 @@ pub struct ThompsonBandit {
     alphas: Vec<f64>,
     /// Beta parameters for Beta distributions (failures + 1)
     betas: Vec<f64>,
+    /// Decay factor for non-stationary environments (0.0 to 1.0)
+    decay_factor: f64,
 }
 
 impl ThompsonBandit {
@@ -130,6 +268,7 @@ impl ThompsonBandit {
             num_arms: n,
             alphas: vec![1.0; n],
             betas: vec![1.0; n],
+            decay_factor: 0.98, // Slowly forget old history
         }
     }
 
@@ -161,7 +300,15 @@ impl ThompsonBandit {
             return;
         }
 
-        // Update selected arm directly (no discount for simpler behavior)
+        // Apply decay to prevent infinite confidence accumulation
+        // This ensures the bandit remains adaptive to concept drift
+        self.alphas[arm] *= self.decay_factor;
+        self.betas[arm] *= self.decay_factor;
+
+        // Ensure we don't drop below priors
+        self.alphas[arm] = self.alphas[arm].max(1.0);
+        self.betas[arm] = self.betas[arm].max(1.0);
+
         if success {
             self.alphas[arm] += 1.0;
         } else {
@@ -218,7 +365,7 @@ pub struct AdaptiveEnsemble {
     /// Thompson sampling bandit for weight learning
     bandit: ThompsonBandit,
     /// Current weights (updated periodically)
-    current_weights: Vec<f64>,
+    current_weights: [f64; NUM_DETECTORS],
     /// Whether to use Thompson sampling (exploration) or expected values (exploitation)
     exploration_rate: f64,
     /// Update counter
@@ -227,10 +374,9 @@ pub struct AdaptiveEnsemble {
     update_interval: usize,
     /// Detector names for reference
     detector_names: Vec<String>,
-    /// Recent ensemble scores for adaptive threshold
-    score_history: VecDeque<f64>,
-    /// History window size
-    history_window: usize,
+    /// P² estimator for O(1) percentile calculation
+    #[serde(skip)]
+    p2_estimator: P2QuantileEstimator,
     /// Adaptive threshold
     adaptive_threshold: f64,
 }
@@ -252,20 +398,24 @@ impl AdaptiveEnsemble {
     /// * `exploration_rate` - Probability of exploration vs exploitation (0.0-1.0)
     /// * `update_interval` - How often to update weights (in samples)
     pub fn new(detector_names: Vec<String>, exploration_rate: f64, update_interval: usize) -> Self {
-        let n = detector_names.len().max(1);
+        let n = detector_names.len().clamp(1, NUM_DETECTORS);
         let exploration = exploration_rate.clamp(0.0, 1.0);
+        let mut current_weights = [0.0; NUM_DETECTORS];
+        let uniform = 1.0 / n as f64;
+        for w in current_weights.iter_mut().take(n) {
+            *w = uniform;
+        }
 
         Self {
             num_detectors: n,
             performance: (0..n).map(|_| DetectorPerformance::new(100)).collect(),
             bandit: ThompsonBandit::new(n),
-            current_weights: vec![1.0 / n as f64; n],
+            current_weights,
             exploration_rate: exploration,
             update_count: 0,
             update_interval: update_interval.max(10),
             detector_names,
-            score_history: VecDeque::with_capacity(1000),
-            history_window: 1000,
+            p2_estimator: P2QuantileEstimator::new(0.95),
             adaptive_threshold: 0.5,
         }
     }
@@ -322,37 +472,34 @@ impl AdaptiveEnsemble {
     pub fn update_with_feedback(
         &mut self,
         outputs: &[DetectorOutput],
-        ensemble_detected: bool,
+        _ensemble_detected: bool,
         was_actual_anomaly: bool,
     ) {
-        // Update individual detector performance
+        // Update individual detector performance AND bandit weights
+        // We treat each detector as an arm that we want to learn the reliability of
         for output in outputs {
             if output.detector_id < self.num_detectors {
                 let detected = output.score > 0.5; // Assuming 0.5 threshold
+
+                // 1. Update Precision/Recall stats
                 self.performance[output.detector_id].update(
                     detected,
                     was_actual_anomaly,
                     output.score,
                 );
+
+                // 2. Update Bandit (Weight Learning)
+                // If it was an anomaly, did this detector find it? (True Positive)
+                // If it was normal, did this detector ignore it? (True Negative)
+                let success = if was_actual_anomaly {
+                    detected // Reward if it detected the anomaly
+                } else {
+                    !detected // Reward if it correctly stayed silent
+                };
+
+                self.bandit.update(output.detector_id, success);
             }
         }
-
-        // Update bandit with ensemble-level feedback
-        // Success = correct detection (detected and was anomaly, or not detected and was normal)
-        let success = ensemble_detected == was_actual_anomaly;
-
-        // Find the detector with highest contribution
-        let best_detector = outputs
-            .iter()
-            .max_by(|a, b| {
-                let a_score = a.score * self.current_weights[a.detector_id];
-                let b_score = b.score * self.current_weights[b.detector_id];
-                a_score.partial_cmp(&b_score).unwrap()
-            })
-            .map(|o| o.detector_id)
-            .unwrap_or(0);
-
-        self.bandit.update(best_detector, success);
 
         // Update weights periodically
         if self.update_count % self.update_interval as u64 == 0 {
@@ -382,14 +529,23 @@ impl AdaptiveEnsemble {
 
         // Combine Thompson and F1 weights (equal blend)
         for i in 0..self.num_detectors {
-            self.current_weights[i] = 0.5 * thompson_weights[i] + 0.5 * normalized_f1[i];
+            if i < thompson_weights.len() && i < normalized_f1.len() {
+                self.current_weights[i] = 0.5 * thompson_weights[i] + 0.5 * normalized_f1[i];
+            }
         }
 
         // Renormalize
-        let sum: f64 = self.current_weights.iter().sum();
+        let sum: f64 = self.current_weights.iter().take(self.num_detectors).sum();
         if sum > 0.0 {
-            self.current_weights.iter_mut().for_each(|w| *w /= sum);
+            self.current_weights
+                .iter_mut()
+                .take(self.num_detectors)
+                .for_each(|w| *w /= sum);
         }
+        self.current_weights
+            .iter_mut()
+            .skip(self.num_detectors)
+            .for_each(|w| *w = 0.0);
     }
 
     /// Calculate ensemble confidence
@@ -422,18 +578,12 @@ impl AdaptiveEnsemble {
     }
 
     /// Update adaptive threshold based on score distribution
+    /// Uses P² algorithm for O(1) percentile estimation
     fn update_threshold(&mut self, score: f64) {
-        self.score_history.push_back(score);
-        if self.score_history.len() > self.history_window {
-            self.score_history.pop_front();
-        }
+        self.p2_estimator.update(score);
 
-        if self.score_history.len() >= 100 {
-            // Calculate 95th percentile as threshold
-            let mut sorted: Vec<f64> = self.score_history.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let idx = (0.95 * (sorted.len() - 1) as f64) as usize;
-            self.adaptive_threshold = sorted[idx.min(sorted.len() - 1)].max(0.5);
+        if self.p2_estimator.count >= 100 {
+            self.adaptive_threshold = self.p2_estimator.get_quantile().max(0.5);
         }
     }
 
@@ -441,14 +591,20 @@ impl AdaptiveEnsemble {
     pub fn get_weights(&self) -> Vec<(String, f64)> {
         self.detector_names
             .iter()
+            .take(self.num_detectors)
             .cloned()
-            .zip(self.current_weights.iter().cloned())
+            .zip(
+                self.current_weights
+                    .iter()
+                    .take(self.num_detectors)
+                    .cloned(),
+            )
             .collect()
     }
 
     /// Current normalized detector weights.
     pub fn current_weights(&self) -> &[f64] {
-        &self.current_weights
+        &self.current_weights[..self.num_detectors]
     }
 
     /// Restore full adaptive state from a checkpoint.
@@ -462,12 +618,19 @@ impl AdaptiveEnsemble {
         if weights.len() != self.num_detectors {
             return Err("invalid weight length");
         }
-        self.current_weights.clone_from_slice(weights);
-        let sum: f64 = self.current_weights.iter().sum();
+        self.current_weights[..self.num_detectors].copy_from_slice(weights);
+        self.current_weights
+            .iter_mut()
+            .skip(self.num_detectors)
+            .for_each(|w| *w = 0.0);
+        let sum: f64 = self.current_weights.iter().take(self.num_detectors).sum();
         if sum <= 0.0 {
             return Err("invalid weight sum");
         }
-        self.current_weights.iter_mut().for_each(|w| *w /= sum);
+        self.current_weights
+            .iter_mut()
+            .take(self.num_detectors)
+            .for_each(|w| *w /= sum);
         self.bandit.set_params(alphas, betas)?;
         self.update_count = total_samples;
         Ok(())
@@ -513,9 +676,13 @@ impl AdaptiveEnsemble {
             .map(|_| DetectorPerformance::new(100))
             .collect();
         self.bandit = ThompsonBandit::new(self.num_detectors);
-        self.current_weights = vec![1.0 / self.num_detectors as f64; self.num_detectors];
+        self.current_weights = [0.0; NUM_DETECTORS];
+        let uniform = 1.0 / self.num_detectors as f64;
+        for w in self.current_weights.iter_mut().take(self.num_detectors) {
+            *w = uniform;
+        }
         self.update_count = 0;
-        self.score_history.clear();
+        self.p2_estimator = P2QuantileEstimator::new(0.95);
         self.adaptive_threshold = 0.5;
     }
 }

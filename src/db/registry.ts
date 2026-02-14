@@ -5,6 +5,8 @@ import { settings } from "../config/settings";
 import type {
 	EvaluationMetric,
 	Patch,
+	Tier1PolicyArtifact,
+	Tier1PolicyMetric,
 	Tier2DeadLetter,
 	Tier2Decision,
 	Tier2Incident,
@@ -91,6 +93,29 @@ export async function initializeRegistry(): Promise<void> {
 			event_id TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			payload JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS tier1_policy_artifacts (
+			id SERIAL PRIMARY KEY,
+			policy_version TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL,
+			compiled_json JSONB NOT NULL,
+			feature_flags JSONB NOT NULL,
+			rollback_of TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS tier1_policy_metrics (
+			id SERIAL PRIMARY KEY,
+			policy_version TEXT NOT NULL,
+			window_start_ts INTEGER NOT NULL,
+			window_end_ts INTEGER NOT NULL,
+			precision INTEGER NOT NULL,
+			recall INTEGER NOT NULL,
+			latency_p95 INTEGER NOT NULL,
+			latency_p99 INTEGER NOT NULL,
+			drop_rate INTEGER NOT NULL,
 			created_at TIMESTAMP DEFAULT NOW()
 		);
 	`);
@@ -326,6 +351,114 @@ export async function getLatestDeadLetters(
 ): Promise<Tier2DeadLetter[]> {
 	return db.query.tier2DeadLetters.findMany({
 		orderBy: [desc(schema.tier2DeadLetters.id)],
+		limit,
+	});
+}
+
+export interface UpsertPolicyArtifactInput {
+	policyVersion: string;
+	status: "draft" | "active" | "rolled_back";
+	compiledJson: Record<string, unknown>;
+	featureFlags: Record<string, unknown>;
+	rollbackOf?: string | null;
+}
+
+export async function upsertTier1PolicyArtifact(
+	input: UpsertPolicyArtifactInput,
+): Promise<void> {
+	await db
+		.insert(schema.tier1PolicyArtifacts)
+		.values({
+			policyVersion: input.policyVersion,
+			status: input.status,
+			compiledJson: input.compiledJson,
+			featureFlags: input.featureFlags,
+			rollbackOf: input.rollbackOf ?? null,
+		})
+		.onConflictDoUpdate({
+			target: schema.tier1PolicyArtifacts.policyVersion,
+			set: {
+				status: input.status,
+				compiledJson: input.compiledJson,
+				featureFlags: input.featureFlags,
+				rollbackOf: input.rollbackOf ?? null,
+			},
+		});
+}
+
+export async function activateTier1Policy(
+	policyVersion: string,
+): Promise<void> {
+	await db
+		.update(schema.tier1PolicyArtifacts)
+		.set({ status: "draft" })
+		.where(eq(schema.tier1PolicyArtifacts.status, "active"));
+
+	await db
+		.update(schema.tier1PolicyArtifacts)
+		.set({ status: "active" })
+		.where(eq(schema.tier1PolicyArtifacts.policyVersion, policyVersion));
+}
+
+export async function getCurrentActivePolicy(): Promise<
+	Tier1PolicyArtifact | undefined
+> {
+	return db.query.tier1PolicyArtifacts.findFirst({
+		where: eq(schema.tier1PolicyArtifacts.status, "active"),
+		orderBy: [desc(schema.tier1PolicyArtifacts.id)],
+	});
+}
+
+export async function getTier1PolicyByVersion(
+	policyVersion: string,
+): Promise<Tier1PolicyArtifact | undefined> {
+	return db.query.tier1PolicyArtifacts.findFirst({
+		where: eq(schema.tier1PolicyArtifacts.policyVersion, policyVersion),
+	});
+}
+
+export async function listTier1Policies(
+	limit: number,
+): Promise<Tier1PolicyArtifact[]> {
+	return db.query.tier1PolicyArtifacts.findMany({
+		orderBy: [desc(schema.tier1PolicyArtifacts.id)],
+		limit,
+	});
+}
+
+export interface Tier1PolicyMetricInput {
+	policyVersion: string;
+	windowStartTs: number;
+	windowEndTs: number;
+	precision: number;
+	recall: number;
+	latencyP95: number;
+	latencyP99: number;
+	dropRate: number;
+}
+
+export async function saveTier1PolicyMetric(
+	input: Tier1PolicyMetricInput,
+): Promise<void> {
+	await db.insert(schema.tier1PolicyMetrics).values({
+		policyVersion: input.policyVersion,
+		windowStartTs: input.windowStartTs,
+		windowEndTs: input.windowEndTs,
+		precision: input.precision,
+		recall: input.recall,
+		latencyP95: input.latencyP95,
+		latencyP99: input.latencyP99,
+		dropRate: input.dropRate,
+	});
+}
+
+export async function listTier1PolicyMetrics(
+	policyVersion: string,
+	limit: number,
+): Promise<Tier1PolicyMetric[]> {
+	return db.query.tier1PolicyMetrics.findMany({
+		where: eq(schema.tier1PolicyMetrics.policyVersion, policyVersion),
+		orderBy: [desc(schema.tier1PolicyMetrics.id)],
 		limit,
 	});
 }

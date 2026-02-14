@@ -9,6 +9,17 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Tier-2 classification label for learning context.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FeedbackLabelClass {
+    BenignKnown = 0,
+    AttackKnown = 1,
+    Novel = 2,
+    #[default]
+    Uncertain = 3,
+}
+
 /// Feedback event from Tier-2
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -27,6 +38,15 @@ pub struct FeedbackEvent {
     pub feedback_confidence: f32,
     /// Source of feedback
     pub feedback_source: FeedbackSource,
+    /// Label class from Tier-2 decisioning.
+    #[serde(default)]
+    pub label_class: FeedbackLabelClass,
+    /// Optional hashed pattern identifier.
+    #[serde(default)]
+    pub pattern_id: Option<u64>,
+    /// End-to-end latency from signal to feedback.
+    #[serde(default)]
+    pub feedback_latency_ms: u64,
 }
 
 /// Source of the feedback
@@ -60,6 +80,9 @@ impl FeedbackEvent {
             original_decision: true,
             feedback_confidence: confidence,
             feedback_source: source,
+            label_class: FeedbackLabelClass::Uncertain,
+            pattern_id: None,
+            feedback_latency_ms: 0,
         }
     }
 
@@ -79,6 +102,9 @@ impl FeedbackEvent {
             original_decision: true,
             feedback_confidence: confidence,
             feedback_source: source,
+            label_class: FeedbackLabelClass::Uncertain,
+            pattern_id: None,
+            feedback_latency_ms: 0,
         }
     }
 
@@ -98,6 +124,9 @@ impl FeedbackEvent {
             original_decision: false, // But we said it wasn't
             feedback_confidence: confidence,
             feedback_source: source,
+            label_class: FeedbackLabelClass::Uncertain,
+            pattern_id: None,
+            feedback_latency_ms: 0,
         }
     }
 

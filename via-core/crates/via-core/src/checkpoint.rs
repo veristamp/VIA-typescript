@@ -3,6 +3,7 @@
 //! This module handles serialization of profile states for persistence.
 //! Tier-2 (Bun) owns the storage; Tier-1 just serializes/deserializes.
 
+use crate::policy::runtime as policy_runtime;
 use crate::registry::ProfileRegistry;
 use crate::signal::NUM_DETECTORS;
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,9 @@ pub struct FullCheckpoint {
     pub global_ensemble: EnsembleCheckpoint,
     /// Feedback statistics
     pub feedback_stats: FeedbackCheckpoint,
+    /// Active runtime policy metadata
+    #[serde(default)]
+    pub policy: PolicyCheckpoint,
 }
 
 /// Checkpoint of feedback statistics
@@ -89,6 +93,13 @@ pub struct FeedbackCheckpoint {
     pub false_negatives: u64,
 }
 
+/// Checkpointed policy metadata for deterministic policy-aware restart flow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyCheckpoint {
+    pub active_policy_version: String,
+    pub policy_checksum: u64,
+}
+
 impl FullCheckpoint {
     /// Create an empty checkpoint
     pub fn empty() -> Self {
@@ -99,6 +110,7 @@ impl FullCheckpoint {
             profiles: Vec::new(),
             global_ensemble: EnsembleCheckpoint::default(),
             feedback_stats: FeedbackCheckpoint::default(),
+            policy: PolicyCheckpoint::default(),
         }
     }
 
@@ -265,6 +277,12 @@ impl CheckpointManager {
             profiles,
             global_ensemble,
             feedback_stats,
+            policy: PolicyCheckpoint {
+                active_policy_version: policy_runtime().current_version(),
+                policy_checksum: xxhash_rust::xxh3::xxh3_64(
+                    policy_runtime().current_version().as_bytes(),
+                ),
+            },
         };
 
         let data = full.to_bytes()?;
@@ -321,6 +339,7 @@ mod tests {
             profiles: vec![],
             global_ensemble: EnsembleCheckpoint::default(),
             feedback_stats: FeedbackCheckpoint::default(),
+            policy: PolicyCheckpoint::default(),
         };
 
         let bytes = checkpoint.to_bytes().unwrap();

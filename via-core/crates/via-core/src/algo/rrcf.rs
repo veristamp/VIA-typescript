@@ -14,8 +14,120 @@
 //! (Guha et al., KDD 2016)
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
+use std::sync::Arc;
+
+// --- Serde Helpers for Arc<[f64]> ---
+
+mod serde_arc {
+    use super::*;
+    use serde::ser::SerializeSeq;
+
+    pub fn serialize<S>(data: &Arc<[f64]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(data.len()))?;
+        for e in data.iter() {
+            seq.serialize_element(e)?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[f64]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec: Vec<f64> = Vec::deserialize(deserializer)?;
+        Ok(vec.into())
+    }
+}
+
+mod serde_points {
+    use super::*;
+    use serde::ser::SerializeSeq;
+
+    pub fn serialize<S>(
+        data: &VecDeque<(u64, Arc<[f64]>)>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(data.len()))?;
+        for (id, point) in data {
+            // Helper struct to match the desired tuple format but with custom serialization
+            #[derive(Serialize)]
+            struct PointHelper<'a> {
+                id: u64,
+                #[serde(with = "serde_arc")]
+                point: &'a Arc<[f64]>,
+            }
+            // Serialize as a tuple (u64, Arc<[f64]>)
+            // Note: Tuple serialization in serde expects ordered elements.
+            // We can manually serialize a tuple variant.
+            let _helper = PointHelper { id: *id, point };
+            // To match Vec<(u64, Arc<[f64]>)> we need to serialize as a tuple.
+            // But helper struct serializes as a map/struct usually?
+            // No, strictly speaking we just want to serialize the elements.
+            // Let's simpler serialize as a tuple:
+            seq.serialize_element(&(*id, Helper(point)))?;
+        }
+        seq.end()
+    }
+
+    // Helper wrapper to apply serde_arc to the second element of the tuple
+    struct Helper<'a>(&'a Arc<[f64]>);
+    impl<'a> Serialize for Helper<'a> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serde_arc::serialize(self.0, serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<VecDeque<(u64, Arc<[f64]>)>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Helper struct to deserialize the tuple
+        struct TupleVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TupleVisitor {
+            type Value = VecDeque<(u64, Arc<[f64]>)>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a sequence of (id, point) tuples")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut vec = VecDeque::new();
+                while let Some((id, point_wrapper)) = seq.next_element::<(u64, PointWrapper)>()? {
+                    vec.push_back((id, point_wrapper.0));
+                }
+                Ok(vec)
+            }
+        }
+
+        // Wrapper to use serde_arc for deserialization
+        struct PointWrapper(Arc<[f64]>);
+        impl<'de> Deserialize<'de> for PointWrapper {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                serde_arc::deserialize(deserializer).map(PointWrapper)
+            }
+        }
+
+        deserializer.deserialize_seq(TupleVisitor)
+    }
+}
 
 /// A node in the RRCF tree
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -27,14 +139,15 @@ enum RcNode {
         left: Box<RcNode>,
         right: Box<RcNode>,
         /// Bounding box for this subtree
-        bbox_min: Vec<f64>,
-        bbox_max: Vec<f64>,
+        bbox_min: Box<[f64]>,
+        bbox_max: Box<[f64]>,
         /// Number of points in subtree
         num_points: usize,
     },
     /// Leaf node containing a point
     Leaf {
-        point: Vec<f64>,
+        #[serde(with = "serde_arc")]
+        point: Arc<[f64]>,
         /// Unique identifier for this point
         point_id: u64,
     },
@@ -72,7 +185,8 @@ pub struct StreamingRRCF {
 struct RcTree {
     root: Option<RcNode>,
     /// Points currently in this tree (id -> point)
-    points: Vec<(u64, Vec<f64>)>,
+    #[serde(with = "serde_points")]
+    points: VecDeque<(u64, Arc<[f64]>)>,
     /// Maximum points this tree can hold
     max_size: usize,
 }
@@ -81,25 +195,28 @@ impl RcTree {
     fn new(max_size: usize) -> Self {
         Self {
             root: None,
-            points: Vec::with_capacity(max_size),
+            points: VecDeque::with_capacity(max_size),
             max_size,
         }
     }
 
     /// Insert a point into the tree
-    fn insert(&mut self, point_id: u64, point: Vec<f64>) -> Option<(u64, Vec<f64>)> {
+    fn insert(&mut self, point_id: u64, point: Arc<[f64]>) -> Option<(u64, Arc<[f64]>)> {
         // If tree is full, need to evict oldest
         let evicted = if self.points.len() >= self.max_size {
             // FIFO eviction (oldest point)
-            let evicted = self.points.remove(0);
-            self.delete_point(&evicted.1);
-            Some(evicted)
+            if let Some(evicted) = self.points.pop_front() {
+                self.delete_point(&evicted.1);
+                Some(evicted)
+            } else {
+                None
+            }
         } else {
             None
         };
 
         // Insert new point
-        self.points.push((point_id, point.clone()));
+        self.points.push_back((point_id, point.clone()));
         self.root = Some(insert_recursive(self.root.take(), point_id, point));
 
         evicted
@@ -126,7 +243,7 @@ impl RcTree {
 }
 
 /// Recursive insertion with proper bounding box updates
-fn insert_recursive(node: Option<RcNode>, point_id: u64, point: Vec<f64>) -> RcNode {
+fn insert_recursive(node: Option<RcNode>, point_id: u64, point: Arc<[f64]>) -> RcNode {
     match node {
         None => RcNode::Leaf { point, point_id },
         Some(RcNode::Leaf {
@@ -181,7 +298,7 @@ fn insert_recursive(node: Option<RcNode>, point_id: u64, point: Vec<f64>) -> RcN
 }
 
 /// Split a leaf node into an internal node with random cut
-fn split_leaf(p1: Vec<f64>, id1: u64, p2: Vec<f64>, id2: u64) -> RcNode {
+fn split_leaf(p1: Arc<[f64]>, id1: u64, p2: Arc<[f64]>, id2: u64) -> RcNode {
     let dims = p1.len();
     if dims == 0 {
         return RcNode::Leaf {
@@ -230,11 +347,11 @@ fn split_leaf(p1: Vec<f64>, id1: u64, p2: Vec<f64>, id2: u64) -> RcNode {
     };
 
     // Create bounding box
-    let mut bbox_min = vec![0.0; dims];
-    let mut bbox_max = vec![0.0; dims];
+    let mut bbox_min = Vec::with_capacity(dims);
+    let mut bbox_max = Vec::with_capacity(dims);
     for i in 0..dims {
-        bbox_min[i] = p1[i].min(p2[i]);
-        bbox_max[i] = p1[i].max(p2[i]);
+        bbox_min.push(p1[i].min(p2[i]));
+        bbox_max.push(p1[i].max(p2[i]));
     }
 
     // Create children based on cut
@@ -267,8 +384,8 @@ fn split_leaf(p1: Vec<f64>, id1: u64, p2: Vec<f64>, id2: u64) -> RcNode {
         cut_value,
         left: Box::new(left_leaf),
         right: Box::new(right_leaf),
-        bbox_min,
-        bbox_max,
+        bbox_min: bbox_min.into_boxed_slice(),
+        bbox_max: bbox_max.into_boxed_slice(),
         num_points: 2,
     }
 }
@@ -447,14 +564,24 @@ impl StreamingRRCF {
             return (0.0, false);
         }
 
-        // Flatten shingle into vector
-        let point: Vec<f64> = self.shingle_buffer.iter().copied().collect();
+        // Flatten shingle into Arc<[f64]>
+        let point: Arc<[f64]> = self
+            .shingle_buffer
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .into();
 
-        self.update_multivariate(point)
+        self.update_multivariate_arc(point)
     }
 
     /// Update with new vector (multivariate)
     pub fn update_multivariate(&mut self, point: Vec<f64>) -> (f64, bool) {
+        self.update_multivariate_arc(point.into())
+    }
+
+    /// Update with shared Arc (zero-allocation for trees)
+    pub fn update_multivariate_arc(&mut self, point: Arc<[f64]>) -> (f64, bool) {
         let point_id = self.next_point_id;
         self.next_point_id += 1;
         self.sample_count += 1;
@@ -467,7 +594,7 @@ impl StreamingRRCF {
             0.0
         };
 
-        // Insert into all trees
+        // Insert into all trees (Arc cloning is cheap)
         for tree in &mut self.trees {
             tree.insert(point_id, point.clone());
         }

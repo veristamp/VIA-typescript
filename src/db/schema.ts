@@ -72,6 +72,29 @@ export const tier2DeadLetters = pgTable("tier2_dead_letters", {
 	createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const tier1PolicyArtifacts = pgTable("tier1_policy_artifacts", {
+	id: serial("id").primaryKey(),
+	policyVersion: text("policy_version").notNull().unique(),
+	status: text("status").notNull(), // draft | active | rolled_back
+	compiledJson: jsonb("compiled_json").notNull(),
+	featureFlags: jsonb("feature_flags").notNull(),
+	rollbackOf: text("rollback_of"),
+	createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const tier1PolicyMetrics = pgTable("tier1_policy_metrics", {
+	id: serial("id").primaryKey(),
+	policyVersion: text("policy_version").notNull(),
+	windowStartTs: integer("window_start_ts").notNull(),
+	windowEndTs: integer("window_end_ts").notNull(),
+	precision: integer("precision").notNull(),
+	recall: integer("recall").notNull(),
+	latencyP95: integer("latency_p95").notNull(),
+	latencyP99: integer("latency_p99").notNull(),
+	dropRate: integer("drop_rate").notNull(),
+	createdAt: timestamp("created_at").defaultNow(),
+});
+
 // Evaluation metrics for benchmark framework
 export const evaluationMetrics = pgTable("evaluation_metrics", {
 	id: serial("id").primaryKey(),
@@ -90,3 +113,5 @@ export type EvaluationMetric = typeof evaluationMetrics.$inferSelect;
 export type Tier2Incident = typeof tier2Incidents.$inferSelect;
 export type Tier2Decision = typeof tier2Decisions.$inferSelect;
 export type Tier2DeadLetter = typeof tier2DeadLetters.$inferSelect;
+export type Tier1PolicyArtifact = typeof tier1PolicyArtifacts.$inferSelect;
+export type Tier1PolicyMetric = typeof tier1PolicyMetrics.$inferSelect;

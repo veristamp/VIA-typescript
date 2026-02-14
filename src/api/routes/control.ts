@@ -23,6 +23,19 @@ const PatchRequestSchema = z.object({
 	context_logs: z.array(z.string()),
 });
 
+const CompilePolicyRequestSchema = z.object({
+	limit: z.number().int().positive().max(500).optional(),
+});
+
+const PublishPolicyRequestSchema = z.object({
+	policy_version: z.string().min(1),
+});
+
+const RollbackPolicyRequestSchema = z.object({
+	target_version: z.string().min(1),
+	reason: z.string().min(1),
+});
+
 app.post("/suppress", async (c) => {
 	const controlService = c.get("controlService") as ControlService;
 	const body = await c.req.json().catch(() => null);
@@ -109,6 +122,85 @@ app.get("/rules", async (c) => {
 	return c.json({
 		rules,
 	});
+});
+
+app.post("/policy/compile", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const body = await c.req.json().catch(() => ({}));
+	const result = CompilePolicyRequestSchema.safeParse(body);
+	if (!result.success) {
+		return c.json({ error: "Invalid request", details: result.error }, 400);
+	}
+
+	const artifact = await controlService.compilePolicy(result.data.limit ?? 250);
+	return c.json({
+		status: "ok",
+		policy_version: artifact.policyVersion,
+		rule_count: artifact.snapshot.rules.length,
+	});
+});
+
+app.post("/policy/publish", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
+	const result = PublishPolicyRequestSchema.safeParse(body);
+	if (!result.success) {
+		return c.json({ error: "Invalid request", details: result.error }, 400);
+	}
+	await controlService.publishPolicy(result.data.policy_version);
+	return c.json({ status: "ok", policy_version: result.data.policy_version });
+});
+
+app.post("/policy/rollback", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const body = await c.req.json().catch(() => null);
+	if (!body) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
+	const result = RollbackPolicyRequestSchema.safeParse(body);
+	if (!result.success) {
+		return c.json({ error: "Invalid request", details: result.error }, 400);
+	}
+	const rollbackVersion = await controlService.rollbackPolicy(
+		result.data.target_version,
+		result.data.reason,
+	);
+	return c.json({ status: "ok", policy_version: rollbackVersion });
+});
+
+app.get("/policy/current", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const policy = await controlService.getCurrentPolicy();
+	if (!policy) {
+		return c.json({ policy: null }, 404);
+	}
+	return c.json({ policy });
+});
+
+app.get("/policy/:version", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const version = c.req.param("version");
+	if (!version) {
+		return c.json({ error: "version is required" }, 400);
+	}
+	const policy = await controlService.getPolicyByVersion(version);
+	if (!policy) {
+		return c.json({ policy: null }, 404);
+	}
+	return c.json({ policy });
+});
+
+app.get("/policy", async (c) => {
+	const controlService = c.get("controlService") as ControlService;
+	const parsed = Number(c.req.query("limit") ?? "50");
+	const limit = Number.isFinite(parsed)
+		? Math.min(Math.max(parsed, 1), 500)
+		: 50;
+	const policies = await controlService.listPolicies(limit);
+	return c.json({ policies });
 });
 
 export const controlRoutes = app;

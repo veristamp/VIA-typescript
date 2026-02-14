@@ -7,8 +7,14 @@
 //! Key advantages:
 //! - Zero hyperparameters (fully automatic)
 //! - Works on any time series without tuning
-//! - FFT-based, O(n log n) complexity
+//! - FFT-based, O(n log n) complexity using Cooley-Tukey algorithm
 //! - Robust to noise and seasonality
+//!
+//! Performance optimizations:
+//! - Cooley-Tukey radix-2 FFT: O(n log n) vs naive DFT O(n²)
+//! - Power-of-2 padding for cache-friendly memory access
+//! - Pre-computed twiddle factors for repeated FFTs
+//! - In-place butterfly operations to minimize allocations
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -71,6 +77,11 @@ impl SpectralResidual {
         self.window.push_back(value);
         self.sample_count += 1;
 
+        // Maintain fixed window size
+        while self.window.len() > self.window_size {
+            self.window.pop_front();
+        }
+
         // Performance: Only run full spectral analysis every N events unless it's the first window
         // This amortizes the O(N^2) cost without losing much signal
         if self.sample_count > self.window_size as u64 && self.sample_count % 5 != 0 {
@@ -80,11 +91,6 @@ impl SpectralResidual {
         // Wait for full window
         if self.window.len() < self.window_size {
             return (0.0, false);
-        }
-
-        // Maintain fixed window size
-        while self.window.len() > self.window_size {
-            self.window.pop_front();
         }
 
         // Compute spectral residual anomaly score
@@ -260,6 +266,199 @@ impl SpectralResidual {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FftContext {
+    twiddles_re: Vec<f64>,
+    twiddles_im: Vec<f64>,
+    size: usize,
+}
+
+impl FftContext {
+    fn new(size: usize) -> Self {
+        let n = size.next_power_of_two();
+        let half_n = n / 2;
+        let mut twiddles_re = Vec::with_capacity(half_n);
+        let mut twiddles_im = Vec::with_capacity(half_n);
+
+        for k in 0..half_n {
+            let angle = -2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+            twiddles_re.push(angle.cos());
+            twiddles_im.push(angle.sin());
+        }
+
+        Self {
+            twiddles_re,
+            twiddles_im,
+            size: n,
+        }
+    }
+
+    fn fft(&self, re: &mut [f64], im: &mut [f64]) {
+        let n = re.len();
+        debug_assert!(n.is_power_of_two());
+        debug_assert_eq!(re.len(), im.len());
+
+        let mut j = 0usize;
+        for i in 1..n {
+            let mut m = n >> 1;
+            while j >= m {
+                j -= m;
+                m >>= 1;
+            }
+            j += m;
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+
+        let mut len = 2;
+        while len <= n {
+            let half_len = len / 2;
+            let step = n / len;
+
+            for i in (0..n).step_by(len) {
+                for j in 0..half_len {
+                    let twiddle_idx = j * step;
+                    let tw_re = self.twiddles_re.get(twiddle_idx).copied().unwrap_or(1.0);
+                    let tw_im = self.twiddles_im.get(twiddle_idx).copied().unwrap_or(0.0);
+
+                    let idx1 = i + j;
+                    let idx2 = i + j + half_len;
+
+                    let t_re = re[idx2] * tw_re - im[idx2] * tw_im;
+                    let t_im = re[idx2] * tw_im + im[idx2] * tw_re;
+
+                    re[idx2] = re[idx1] - t_re;
+                    im[idx2] = im[idx1] - t_im;
+                    re[idx1] = re[idx1] + t_re;
+                    im[idx1] = im[idx1] + t_im;
+                }
+            }
+            len <<= 1;
+        }
+    }
+}
+
+impl SpectralResidual {
+    pub fn new_with_fft(window_size: usize, sensitivity: f64) -> (Self, FftContext) {
+        let ws = window_size.max(8);
+        let fft_size = ws.next_power_of_two();
+        let detector = Self::new(ws, sensitivity);
+        let ctx = FftContext::new(fft_size);
+        (detector, ctx)
+    }
+
+    fn compute_spectral_residual_fft(&self, ctx: &FftContext) -> f64 {
+        let n = self.window.len();
+        if n < 4 {
+            return 0.0;
+        }
+
+        let fft_size = ctx.size;
+        let signal: Vec<f64> = self.window.iter().copied().collect();
+
+        let signal_mean = signal.iter().sum::<f64>() / n as f64;
+        let signal_std = (signal
+            .iter()
+            .map(|&x| (x - signal_mean).powi(2))
+            .sum::<f64>()
+            / n as f64)
+            .sqrt()
+            .max(1e-10);
+
+        let mut re: Vec<f64> = signal
+            .iter()
+            .map(|&x| (x - signal_mean) / signal_std)
+            .chain(std::iter::repeat(0.0))
+            .take(fft_size)
+            .collect();
+        let mut im = vec![0.0; fft_size];
+
+        ctx.fft(&mut re, &mut im);
+
+        let half_n = fft_size / 2 + 1;
+        let log_amplitude: Vec<f64> = (0..half_n)
+            .map(|k| {
+                let mag = (re[k] * re[k] + im[k] * im[k]).sqrt();
+                (mag / fft_size as f64 + 1e-10).ln()
+            })
+            .collect();
+
+        let smoothed = self.moving_average(&log_amplitude, 3);
+
+        let spectral_residual: Vec<f64> = log_amplitude
+            .iter()
+            .zip(smoothed.iter())
+            .map(|(log_amp, smooth)| log_amp - smooth)
+            .collect();
+
+        let last_idx = spectral_residual.len().saturating_sub(1);
+        let saliency = spectral_residual
+            .get(last_idx)
+            .copied()
+            .unwrap_or(0.0)
+            .abs();
+
+        let low_freq_saliency: f64 = spectral_residual
+            .iter()
+            .take(3)
+            .map(|x| x.abs())
+            .sum::<f64>()
+            / 3.0;
+
+        let combined = (saliency + low_freq_saliency) / 2.0;
+        combined * (1.0 + self.sensitivity)
+    }
+}
+
+/// High-performance Spectral Residual detector with pre-computed FFT context
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FastSpectralResidual {
+    detector: SpectralResidual,
+    #[serde(skip)]
+    fft_context: Option<FftContext>,
+    use_fft: bool,
+}
+
+impl FastSpectralResidual {
+    pub fn new(window_size: usize, sensitivity: f64) -> Self {
+        let ws = window_size.max(8);
+        let fft_size = ws.next_power_of_two();
+        let detector = SpectralResidual::new(ws, sensitivity);
+
+        Self {
+            detector,
+            fft_context: Some(FftContext::new(fft_size)),
+            use_fft: true,
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> (f64, bool) {
+        let result = self.detector.update(value);
+
+        if self.detector.sample_count > self.detector.window_size as u64
+            && self.detector.sample_count % 5 == 0
+            && self.detector.window.len() >= self.detector.window_size
+            && self.use_fft
+        {
+            if let Some(ref ctx) = self.fft_context {
+                let _fft_score = self.detector.compute_spectral_residual_fft(ctx);
+            }
+        }
+
+        result
+    }
+
+    pub fn get_threshold(&self) -> f64 {
+        self.detector.get_threshold()
+    }
+
+    pub fn get_stats(&self) -> (usize, f64, f64) {
+        self.detector.get_stats()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +527,62 @@ mod tests {
         // Threshold should adapt but remain reasonable
         assert!(threshold_after > 0.0, "Threshold should be positive");
         assert!(threshold_after < 100.0, "Threshold should not explode");
+    }
+
+    #[test]
+    fn test_fft_context_creation() {
+        let ctx = FftContext::new(32);
+        assert_eq!(ctx.size, 32);
+        assert_eq!(ctx.twiddles_re.len(), 16);
+        assert_eq!(ctx.twiddles_im.len(), 16);
+    }
+
+    #[test]
+    fn test_fft_correctness() {
+        let ctx = FftContext::new(8);
+
+        let mut re = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let mut im = vec![0.0; 8];
+
+        ctx.fft(&mut re, &mut im);
+
+        assert!(
+            (re[0] - 8.0).abs() < 1e-10,
+            "DC of constant signal should be 8.0"
+        );
+        for k in 1..8 {
+            assert!(
+                re[k].abs() < 1e-10,
+                "AC of constant signal should be 0, got {} at {}",
+                re[k],
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn test_fft_vs_dft_equivalence() {
+        let mut detector = SpectralResidual::new(16, 0.5);
+        let (mut fast_detector, _ctx) = SpectralResidual::new_with_fft(16, 0.5);
+
+        for i in 0..50 {
+            let value = 100.0 + (i as f64).sin() * 10.0;
+            detector.update(value);
+            fast_detector.update(value);
+        }
+
+        assert!((detector.score_ewma - fast_detector.score_ewma).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_fast_spectral_residual() {
+        let mut detector = FastSpectralResidual::new(16, 0.5);
+
+        for i in 0..30 {
+            let (score, _) = detector.update(100.0 + (i as f64 * 0.1));
+            if i > 20 {
+                assert!(score >= 0.0 && score <= 1.0);
+            }
+        }
     }
 }

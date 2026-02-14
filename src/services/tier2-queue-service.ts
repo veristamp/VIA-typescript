@@ -8,6 +8,8 @@ interface QueueTask {
 	signals: IncomingAnomalySignal[];
 	attempts: number;
 	enqueuedAt: number;
+	nextAttemptAt: number;
+	priority: "critical" | "normal";
 }
 
 export interface QueueStats {
@@ -27,6 +29,7 @@ export class Tier2QueueService {
 	private readonly batchSize = settings.queue.batchSize;
 	private readonly maxAttempts = 3;
 	private flushTimer: Timer | null = null;
+	private readonly maxWorkers = settings.queue.maxWorkers;
 	private inFlight = 0;
 	private stats: QueueStats = {
 		queued: 0,
@@ -91,54 +94,107 @@ export class Tier2QueueService {
 			signals,
 			attempts: 0,
 			enqueuedAt: now,
+			nextAttemptAt: now,
+			priority: this.resolvePriority(signals),
 		});
 		this.dedupeMap.set(eventId, now + this.dedupeWindowSec);
 		this.stats.queued += 1;
 		return { accepted: true, eventId };
 	}
 
+	private resolvePriority(
+		signals: IncomingAnomalySignal[],
+	): "critical" | "normal" {
+		const maxSeverity = signals.reduce(
+			(acc, signal) => Math.max(acc, signal.severity),
+			0,
+		);
+		return maxSeverity >= 0.85 ? "critical" : "normal";
+	}
+
+	private pickRunnableTasks(now: number): QueueTask[] {
+		if (this.queue.length === 0) {
+			return [];
+		}
+
+		const runnable: QueueTask[] = [];
+		const kept: QueueTask[] = [];
+
+		for (const task of this.queue) {
+			if (task.nextAttemptAt <= now) {
+				runnable.push(task);
+			} else {
+				kept.push(task);
+			}
+		}
+
+		runnable.sort((a, b) => {
+			const pa = a.priority === "critical" ? 0 : 1;
+			const pb = b.priority === "critical" ? 0 : 1;
+			if (pa !== pb) {
+				return pa - pb;
+			}
+			return a.enqueuedAt - b.enqueuedAt;
+		});
+
+		const selected = runnable.slice(0, this.batchSize);
+		const deferred = runnable.slice(this.batchSize);
+		this.queue = [...kept, ...deferred];
+		return selected;
+	}
+
 	private async flush(): Promise<void> {
-		if (this.queue.length === 0 || this.inFlight > 0) {
+		if (this.queue.length === 0 || this.inFlight >= this.maxWorkers) {
 			return;
 		}
 
-		const tasks = this.queue.splice(0, this.batchSize);
+		const now = Math.floor(Date.now() / 1000);
+		const capacity = this.maxWorkers - this.inFlight;
+		const tasks = this.pickRunnableTasks(now).slice(0, capacity);
 		if (tasks.length === 0) {
 			return;
 		}
 
-		this.inFlight += 1;
+		this.inFlight += tasks.length;
 		this.stats.inFlight = this.inFlight;
 
-		try {
-			for (const task of tasks) {
-				try {
-					await this.tier2Service.processAnomalyBatch(task.signals);
-					this.stats.processed += 1;
-				} catch (error) {
-					task.attempts += 1;
-					if (task.attempts < this.maxAttempts) {
-						this.queue.push(task);
-						this.stats.retried += 1;
-					} else {
-						this.stats.dlq += 1;
-						await saveDeadLetter(task.eventId, "processing_failed", {
-							error: String(error),
-							attempts: task.attempts,
-							age_sec: Math.max(
-								0,
-								Math.floor(Date.now() / 1000) - task.enqueuedAt,
-							),
-						});
-						logger.error("Task moved to DLQ", {
-							eventId: task.eventId,
-							error: String(error),
-						});
-					}
+		const workers = tasks.map(async (task) => {
+			try {
+				await this.tier2Service.processAnomalyBatch(task.signals);
+				this.stats.processed += 1;
+			} catch (error) {
+				task.attempts += 1;
+				if (task.attempts < this.maxAttempts) {
+					const jitterMs = Math.floor(Math.random() * 100);
+					const backoffMs =
+						settings.queue.retryBaseDelayMs *
+							2 ** Math.max(0, task.attempts - 1) +
+						jitterMs;
+					task.nextAttemptAt = Math.floor((Date.now() + backoffMs) / 1000);
+					this.queue.push(task);
+					this.stats.retried += 1;
+				} else {
+					this.stats.dlq += 1;
+					await saveDeadLetter(task.eventId, "processing_failed", {
+						error: String(error),
+						attempts: task.attempts,
+						age_sec: Math.max(
+							0,
+							Math.floor(Date.now() / 1000) - task.enqueuedAt,
+						),
+					});
+					logger.error("Task moved to DLQ", {
+						eventId: task.eventId,
+						error: String(error),
+					});
 				}
 			}
+		});
+
+		try {
+			await Promise.all(workers);
 		} finally {
-			this.inFlight -= 1;
+			this.inFlight = Math.max(0, this.inFlight - tasks.length);
 			this.stats.inFlight = this.inFlight;
 		}
 	}

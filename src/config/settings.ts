@@ -12,6 +12,14 @@ export const settings = {
 		maxSize: 10000,
 		batchSize: 100,
 		flushInterval: 1000,
+		maxWorkers: 4,
+		retryBaseDelayMs: 200,
+	},
+	embedding: {
+		batchSize: 64,
+		maxConcurrency: 4,
+		cacheTtlSec: 900,
+		maxRetries: 2,
 	},
 	server: {
 		port: 3000,
@@ -27,5 +35,6 @@ export const settings = {
 	qdrant: {
 		host: "localhost",
 		port: 6333,
+		maxConcurrentUpserts: 4,
 	},
 } as const;

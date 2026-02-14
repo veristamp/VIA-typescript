@@ -11,6 +11,7 @@ import {
 	ControlService,
 	ForensicAnalysisService,
 	IncidentService,
+	PolicyCompilerService,
 	QdrantService,
 	SchemaService,
 	Tier2QueueService,
@@ -22,7 +23,8 @@ import { logger } from "./utils/logger";
 // Initialize services
 const qdrantService = new QdrantService();
 const schemaService = new SchemaService();
-const controlService = new ControlService();
+const policyCompilerService = new PolicyCompilerService();
+const controlService = new ControlService(policyCompilerService);
 const forensicAnalysisService = new ForensicAnalysisService(qdrantService);
 const incidentService = new IncidentService();
 const evaluationService = new EvaluationService();

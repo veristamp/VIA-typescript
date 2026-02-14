@@ -6,3 +6,4 @@ export * from "./qdrant-service";
 export * from "./schema-service";
 export * from "./tier2-queue-service";
 export * from "./tier2-service";
+export * from "./policy-compiler-service";

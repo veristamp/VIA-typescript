@@ -104,4 +104,3 @@ cargo test --lib
 
 ## License
 
-See workspace root for license information.

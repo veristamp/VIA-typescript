@@ -10,12 +10,16 @@
 //! - Request velocity and timing
 //! - Payload characteristics
 
-use crate::algo::{histogram::FadingHistogram, hll::HyperLogLog};
+use crate::algo::{cms::CountMinSketch, histogram::FadingHistogram, hll::HyperLogLog};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Hour of day histogram (24 bins)
 type HourHistogram = [u64; 24];
+
+fn default_service_diversity() -> HyperLogLog {
+    HyperLogLog::new(10)
+}
 
 /// Behavioral profile for a single entity
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -38,8 +42,11 @@ pub struct BehavioralProfile {
     pub iat_histogram: FadingHistogram,
     /// Payload size distribution
     pub payload_histogram: FadingHistogram,
-    /// Services/resources accessed (Count-Min sketch simulation)
-    pub service_access: HashMap<u64, u64>,
+    /// Services/resources accessed (Count-Min sketch for memory efficiency)
+    pub service_access: CountMinSketch,
+    /// Service diversity estimator (HLL) to retain diversity telemetry
+    #[serde(default = "default_service_diversity")]
+    pub service_diversity: HyperLogLog,
     /// Geographic locations (HLL for IP diversity)
     pub geo_diversity: HyperLogLog,
     /// Recent behavior score (0.0 = normal, 1.0 = anomalous)
@@ -64,7 +71,8 @@ impl BehavioralProfile {
             velocity_alpha: 0.1,
             iat_histogram: FadingHistogram::new(20, 0.0, 10000.0, 0.999),
             payload_histogram: FadingHistogram::new(20, 0.0, 100000.0, 0.999),
-            service_access: HashMap::with_capacity(50),
+            service_access: CountMinSketch::default_sketch(),
+            service_diversity: HyperLogLog::new(10),
             geo_diversity: HyperLogLog::new(10),
             behavior_score: 0.0,
             anomaly_count: 0,
@@ -103,7 +111,8 @@ impl BehavioralProfile {
         self.payload_histogram.update(payload_size);
 
         // Update service access
-        *self.service_access.entry(service_hash).or_insert(0) += 1;
+        self.service_access.increment(service_hash);
+        self.service_diversity.add_hash(service_hash);
 
         // Update geo diversity
         self.geo_diversity.add_hash(geo_hash);
@@ -157,7 +166,7 @@ impl BehavioralProfile {
         }
 
         // 5. Service access deviation (new service)
-        if !self.service_access.contains_key(&service_hash) {
+        if !self.service_access.contains(service_hash) {
             deviations.push(0.3); // Accessing new service
         }
 
@@ -185,9 +194,9 @@ impl BehavioralProfile {
             .collect()
     }
 
-    /// Get service diversity (number of unique services)
+    /// Get service diversity count (estimated via HLL)
     pub fn get_service_diversity(&self) -> usize {
-        self.service_access.len()
+        self.service_diversity.count() as usize
     }
 
     /// Get geo diversity count

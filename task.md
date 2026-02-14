@@ -1,0 +1,36 @@
+# Task Ledger (Append-Only)
+
+## 2026-02-14
+- [START] Begin implementation from `ARCHITECTURE_UPGRADE_BLUEPRINT.md`.
+- [TODO] Create Tier-2 policy artifact schema + registry APIs.
+- [TODO] Implement Tier-2 policy compiler service and control API endpoints.
+- [TODO] Implement Tier-1 policy runtime module and hook into `engine.rs`.
+- [TODO] Add Tier-1 gatekeeper policy endpoints (`/policy/snapshot`, `/policy/version`, `/policy/rollback`).
+- [TODO] Persist policy metadata in checkpoint structures.
+- [TODO] Implement Tier-2 embedding throughput upgrades (batching, concurrency limits, cache).
+- [TODO] Implement Tier-2 queue concurrency upgrades.
+- [TODO] Add/upgrade tests for real-world behavior across touched modules.
+- [TODO] Run validation: `cargo test`, `cargo fmt`, `cargo clippy`, and TypeScript test/typecheck.
+- [UPDATE] Implemented Tier-2 policy artifact tables and registry APIs.
+- [UPDATE] Added `PolicyCompilerService` and control-plane policy endpoints (`compile/publish/rollback/current/list`).
+- [UPDATE] Added Tier-1 policy runtime module (`via-core/src/policy.rs`) with install/evaluate/rollback and unit tests.
+- [UPDATE] Hooked policy effect into `engine.rs` anomaly decision path and added suppression behavior test.
+- [UPDATE] Added gatekeeper policy endpoints and policy version in `/stats`.
+- [UPDATE] Added checkpoint policy metadata fields with serde defaults.
+- [UPDATE] Added feedback enrichment fields (`label_class`, `pattern_id`, `feedback_latency_ms`).
+- [UPDATE] Implemented Tier-2 embedding throughput upgrades in `qdrant-service.ts` (batching, cache, bounded concurrency).
+- [UPDATE] Implemented Tier-2 queue worker concurrency and retry backoff in `tier2-queue-service.ts`.
+- [DONE] Tier-2 policy artifact schema + registry APIs implemented.
+- [DONE] Tier-2 policy compiler service + control routes implemented.
+- [DONE] Tier-1 policy runtime (`policy.rs`) implemented with install/evaluate/rollback.
+- [DONE] Tier-1 engine decision path now applies policy effects (boost/suppress).
+- [DONE] Gatekeeper policy endpoints implemented (`/policy/snapshot`, `/policy/version`, `/policy/rollback`).
+- [DONE] Checkpoint metadata now includes policy version + checksum.
+- [DONE] Tier-2 embedding path upgraded (batch requests, dedupe, cache, bounded concurrency).
+- [DONE] Tier-2 queue upgraded to multi-worker flush + retry backoff + priority.
+- [DONE] Added Bun tests for policy compiler; added Rust policy and integration tests.
+- [VALIDATION] `bun run typecheck` => PASS.
+- [VALIDATION] `bun test` => PASS (2 tests).
+- [VALIDATION] `cargo test -p via-core` => PASS (73 tests).
+- [VALIDATION] `cargo fmt` => PASS.
+- [VALIDATION] `cargo clippy -p via-core` => PASS with existing project warnings (no clippy errors after FFI lint allow).

@@ -31,12 +31,158 @@ export class QdrantService {
 	private tier1CollectionPrefix: string = "via_tier1_monitor";
 	private tier2CollectionPrefix: string = "via_forensic_index_v2";
 	private embeddingUrl: string;
+	private embeddingCache = new Map<
+		string,
+		{ vector: number[]; expiresAt: number }
+	>();
 
 	constructor() {
 		this.client = new QdrantClient({
 			url: `http://${settings.qdrant.host}:${settings.qdrant.port}`,
 		});
 		this.embeddingUrl = process.env.EMBEDDING_URL || "http://localhost:8080";
+	}
+
+	private async mapWithConcurrency<T, R>(
+		items: T[],
+		limit: number,
+		mapper: (item: T, index: number) => Promise<R>,
+	): Promise<R[]> {
+		const capped = Math.max(1, limit);
+		const results: R[] = new Array(items.length);
+		let cursor = 0;
+		const workers = Array.from(
+			{ length: Math.min(capped, items.length) },
+			async () => {
+				while (true) {
+					const idx = cursor;
+					cursor += 1;
+					if (idx >= items.length) {
+						break;
+					}
+					results[idx] = await mapper(items[idx], idx);
+				}
+			},
+		);
+		await Promise.all(workers);
+		return results;
+	}
+
+	private normalizeEmbeddingText(text: string): string {
+		return text.trim().replace(/\s+/g, " ").toLowerCase();
+	}
+
+	private getCachedEmbedding(text: string): number[] | null {
+		const key = Bun.hash
+			.xxHash64(this.normalizeEmbeddingText(text))
+			.toString(16);
+		const cached = this.embeddingCache.get(key);
+		const now = Math.floor(Date.now() / 1000);
+		if (!cached) {
+			return null;
+		}
+		if (cached.expiresAt <= now) {
+			this.embeddingCache.delete(key);
+			return null;
+		}
+		return cached.vector;
+	}
+
+	private cacheEmbedding(text: string, vector: number[]): void {
+		const key = Bun.hash
+			.xxHash64(this.normalizeEmbeddingText(text))
+			.toString(16);
+		this.embeddingCache.set(key, {
+			vector,
+			expiresAt: Math.floor(Date.now() / 1000) + settings.embedding.cacheTtlSec,
+		});
+	}
+
+	private async requestEmbeddingBatch(texts: string[]): Promise<number[][]> {
+		const response = await fetch(`${this.embeddingUrl}/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ input: texts }),
+		});
+
+		if (!response.ok) {
+			throw new Error(`embedding service returned ${response.status}`);
+		}
+
+		const data = (await response.json()) as { embeddings?: number[][] };
+		if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length) {
+			throw new Error("embedding service returned invalid batch shape");
+		}
+		return data.embeddings;
+	}
+
+	private async getEmbeddings(texts: string[]): Promise<number[][]> {
+		const vectors: number[][] = new Array(texts.length);
+		const unresolved: Array<{ text: string; indices: number[] }> = [];
+		const byNormalized = new Map<string, { text: string; indices: number[] }>();
+
+		texts.forEach((text, index) => {
+			const cached = this.getCachedEmbedding(text);
+			if (cached) {
+				vectors[index] = cached;
+				return;
+			}
+			const normalized = this.normalizeEmbeddingText(text);
+			const existing = byNormalized.get(normalized);
+			if (existing) {
+				existing.indices.push(index);
+				return;
+			}
+			byNormalized.set(normalized, { text, indices: [index] });
+		});
+
+		unresolved.push(...byNormalized.values());
+		if (unresolved.length === 0) {
+			return vectors;
+		}
+
+		const chunkSize = Math.max(1, settings.embedding.batchSize);
+		const chunks: Array<Array<{ text: string; indices: number[] }>> = [];
+		for (let i = 0; i < unresolved.length; i += chunkSize) {
+			chunks.push(unresolved.slice(i, i + chunkSize));
+		}
+
+		await this.mapWithConcurrency(
+			chunks,
+			settings.embedding.maxConcurrency,
+			async (chunk) => {
+				const batchTexts = chunk.map((item) => item.text);
+				let batchVectors: number[][] | null = null;
+
+				for (let attempt = 0; attempt <= settings.embedding.maxRetries; attempt++) {
+					try {
+						batchVectors = await this.requestEmbeddingBatch(batchTexts);
+						break;
+					} catch (error) {
+						if (attempt === settings.embedding.maxRetries) {
+							logger.warn("Embedding batch failed, using fallback vectors", {
+								error: String(error),
+								batchSize: batchTexts.length,
+							});
+						}
+					}
+				}
+
+				if (!batchVectors) {
+					batchVectors = batchTexts.map((text) => this.generateFallbackVector(text));
+				}
+
+				chunk.forEach((item, idx) => {
+					const vector = batchVectors?.[idx] || this.generateFallbackVector(item.text);
+					this.cacheEmbedding(item.text, vector);
+					for (const originalIndex of item.indices) {
+						vectors[originalIndex] = vector;
+					}
+				});
+			},
+		);
+
+		return vectors;
 	}
 
 	get tier1Dimension(): number {
@@ -258,33 +404,32 @@ export class QdrantService {
 			eventsByCollection.get(collectionName)?.push(event);
 		}
 
-		// Process each collection
-		for (const [collection, collectionEvents] of eventsByCollection) {
-			await this.ensureDailyTier2Collection(collection);
-
-			const points = await Promise.all(
-				collectionEvents.map(async (event) => {
-					const denseVector = await this.getEmbedding(event.textForEmbedding);
-					const sparseVector = await this.generateSparseVector(
-						event.textForEmbedding,
-					);
-
+		const collectionEntries = Array.from(eventsByCollection.entries());
+		await this.mapWithConcurrency(
+			collectionEntries,
+			settings.qdrant.maxConcurrentUpserts,
+			async ([collection, collectionEvents]) => {
+				await this.ensureDailyTier2Collection(collection);
+				const denseVectors = await this.getEmbeddings(
+					collectionEvents.map((event) => event.textForEmbedding),
+				);
+				const points = collectionEvents.map((event, idx) => {
+					const sparseVector = this.generateSparseVector(event.textForEmbedding);
 					return {
 						id: this.generateId(),
 						vector: {
-							log_dense_vector: denseVector,
+							log_dense_vector: denseVectors[idx],
 							bm25_vector: sparseVector,
 						},
 						payload: event.payload,
 					};
-				}),
-			);
-
-			await this.client.upsert(collection, {
-				points,
-				wait: false,
-			});
-		}
+				});
+				await this.client.upsert(collection, {
+					points,
+					wait: false,
+				});
+			},
+		);
 	}
 
 	async getPointsFromTier1(startTs: number, endTs: number): Promise<unknown[]> {
@@ -460,6 +605,10 @@ export class QdrantService {
 	}
 
 	private async getEmbedding(text: string): Promise<number[]> {
+		const cached = this.getCachedEmbedding(text);
+		if (cached) {
+			return cached;
+		}
 		try {
 			const response = await fetch(`${this.embeddingUrl}/embeddings`, {
 				method: "POST",
@@ -471,16 +620,22 @@ export class QdrantService {
 				logger.warn("Embedding service unavailable, using fallback", {
 					status: response.status,
 				});
-				return this.generateFallbackVector(text);
+				const fallback = this.generateFallbackVector(text);
+				this.cacheEmbedding(text, fallback);
+				return fallback;
 			}
 
 			const data = (await response.json()) as { embeddings?: number[][] };
-			return data.embeddings?.[0] || this.generateFallbackVector(text);
+			const vector = data.embeddings?.[0] || this.generateFallbackVector(text);
+			this.cacheEmbedding(text, vector);
+			return vector;
 		} catch (error) {
 			logger.warn("Embedding request failed, using fallback", {
 				error: String(error),
 			});
-			return this.generateFallbackVector(text);
+			const fallback = this.generateFallbackVector(text);
+			this.cacheEmbedding(text, fallback);
+			return fallback;
 		}
 	}
 
@@ -499,9 +654,7 @@ export class QdrantService {
 		return vector;
 	}
 
-	private async generateSparseVector(
-		text: string,
-	): Promise<{ indices: number[]; values: number[] }> {
+	private generateSparseVector(text: string): { indices: number[]; values: number[] } {
 		const words = text.toLowerCase().split(/\s+/);
 		const freq = new Map<string, number>();
 		for (const word of words) {
@@ -512,8 +665,8 @@ export class QdrantService {
 
 		for (const [word, count] of freq.entries()) {
 			const hash = Bun.hash.xxHash64(word);
-			const hashValue = Number(hash & 0xffn);
-			indices.push(hashValue % 1000);
+			const hashValue = Number(hash & 0xffffffffn);
+			indices.push(hashValue % 16384);
 			values.push(1 + count / Math.max(words.length, 1));
 		}
 

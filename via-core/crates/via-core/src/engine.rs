@@ -7,7 +7,6 @@
 //! This engine produces `AnomalySignal` with full detector breakdown and attribution.
 
 use crate::algo::{
-    AdaptiveThreshold,
     adaptive_ensemble::{AdaptiveEnsemble, DetectorOutput},
     adaptive_threshold::presets,
     behavioral_fingerprint::BehavioralFingerprintDetector,
@@ -20,11 +19,13 @@ use crate::algo::{
     multi_scale::MultiScaleDetector,
     rrcf::RRCFDetector,
     spectral_residual::SpectralResidual,
+    AdaptiveThreshold,
 };
 use crate::checkpoint::{CheckpointError, Checkpointable, EnsembleCheckpoint};
 use crate::feedback::{FeedbackEvent, LearningUpdate};
+use crate::policy::runtime as policy_runtime;
 use crate::signal::{
-    AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, NUM_DETECTORS, Severity,
+    AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, Severity, NUM_DETECTORS,
 };
 
 // ============================================================================
@@ -416,7 +417,11 @@ impl Detector for SpectralDetector {
             let trend = if self.last_values.len() >= 2 {
                 let first = self.last_values.first().unwrap_or(&ctx.value);
                 let last = self.last_values.last().unwrap_or(&ctx.value);
-                if last > first { "spike" } else { "drop" }
+                if last > first {
+                    "spike"
+                } else {
+                    "drop"
+                }
             } else {
                 "anomaly"
             };
@@ -934,15 +939,16 @@ impl AnomalyProfile {
         let variance = (self.value_sum_sq / n.max(1.0)) - (avg * avg);
         let std = variance.max(0.0).sqrt();
 
-        // Fast path: if the value is very close to the mean, skip heavy detectors
-        // to boost throughput significantly for normal traffic
-        let is_very_normal = !is_warmup && (value - avg).abs() < 1.0 * std;
+        let uncertainty_score = self.compute_uncertainty(value, avg, std);
+        let use_fast_path = uncertainty_score < 0.3 && !is_warmup;
 
         // Run all 10 detectors with static dispatch
+        // Note: We ALWAYS run all detectors to maintain state consistency
+        // The uncertainty gate only affects the combine path complexity
         Self::run_detector(
             &mut self.v_volume,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -950,7 +956,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_dist,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -958,7 +964,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_card,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -966,7 +972,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_burst,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -974,7 +980,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_spectral,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -982,7 +988,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_cp,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -990,7 +996,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_rrcf,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -998,7 +1004,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_ms,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -1006,7 +1012,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_behavioral,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -1014,7 +1020,7 @@ impl AnomalyProfile {
         Self::run_detector(
             &mut self.v_drift,
             &ctx,
-            is_very_normal,
+            use_fast_path,
             &mut detector_scores,
             &mut detector_outputs,
             &mut output_count,
@@ -1055,19 +1061,30 @@ impl AnomalyProfile {
         };
         let attribution = Attribution::compute(&detector_scores, &weights_f64);
 
+        // Apply Tier-2 compiled runtime policy (if any)
+        let policy_effect = policy_runtime().evaluate(
+            unique_id_hash,
+            attribution.primary_detector,
+            ensemble_confidence,
+        );
+        let adjusted_score = (ensemble_score * policy_effect.score_scale).clamp(0.0, 1.0);
+        let adjusted_confidence =
+            (ensemble_confidence * policy_effect.confidence_scale).clamp(0.0, 1.0);
+
         // Build the signal
-        let severity = Severity::from_score(ensemble_score);
+        let severity = Severity::from_score(adjusted_score);
 
         // Hybrid decision: detector floor + ensemble score floor + adaptive ensemble threshold.
         let any_detector_fired = detector_scores
             .iter()
             .any(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly);
         let adaptive_trigger = self.config.use_adaptive_ensemble_threshold
-            && self.ensemble.is_anomaly(ensemble_score)
-            && ensemble_confidence >= self.config.confidence_threshold;
-        let score_floor_trigger = ensemble_score >= self.config.min_ensemble_score_for_anomaly;
+            && self.ensemble.is_anomaly(adjusted_score)
+            && adjusted_confidence >= self.config.confidence_threshold;
+        let score_floor_trigger = adjusted_score >= self.config.min_ensemble_score_for_anomaly;
 
-        let is_anomaly = any_detector_fired || adaptive_trigger || score_floor_trigger;
+        let is_anomaly = !policy_effect.suppress
+            && (any_detector_fired || adaptive_trigger || score_floor_trigger);
 
         AnomalySignal {
             entity_hash: unique_id_hash,
@@ -1075,8 +1092,8 @@ impl AnomalyProfile {
             sequence: self.event_count,
             is_anomaly,
             severity,
-            ensemble_score,
-            confidence: ensemble_confidence,
+            ensemble_score: adjusted_score,
+            confidence: adjusted_confidence,
             detector_scores,
             detector_weights: weight_array,
             attribution,
@@ -1090,27 +1107,15 @@ impl AnomalyProfile {
     fn run_detector<D: Detector>(
         detector: &mut D,
         ctx: &SignalContext,
-        is_very_normal: bool,
+        _fast_path: bool,
         scores: &mut [DetectorScore; NUM_DETECTORS],
         outputs: &mut [DetectorOutput; NUM_DETECTORS],
         output_count: &mut usize,
     ) {
         let detector_id = detector.id() as usize;
 
-        // Skip heavy detectors if traffic is very normal (Performance Optimization)
-        let is_heavy = detector_id == DetectorId::RRCF as usize
-            || detector_id == DetectorId::Spectral as usize;
-
-        if is_heavy && is_very_normal {
-            outputs[*output_count] = DetectorOutput {
-                detector_id,
-                score: 0.0,
-                confidence: 1.0,
-                signal_type: 0,
-            };
-            *output_count += 1;
-            return;
-        }
+        // IMPORTANT: Always run detector.update() to maintain state consistency
+        // Fast path only affects output complexity, not detector state
 
         if let Some(result) = detector.update(ctx) {
             scores[detector_id] = DetectorScore::new(
@@ -1137,6 +1142,33 @@ impl AnomalyProfile {
             };
             *output_count += 1;
         }
+    }
+
+    #[inline]
+    fn compute_uncertainty(&self, value: f64, avg: f64, std: f64) -> f64 {
+        if std < 1e-10 {
+            return 0.0;
+        }
+
+        let z_score = ((value - avg) / std).abs();
+        let frequency_deviation = if self.frequency_ewma.get_value() > 0.0 {
+            let expected_freq = self.frequency_ewma.get_value();
+            (expected_freq / (expected_freq + 1.0)).min(1.0)
+        } else {
+            0.5
+        };
+
+        let value_uncertainty = if z_score < 1.0 {
+            0.0
+        } else if z_score < 2.0 {
+            0.2
+        } else if z_score < 3.0 {
+            0.5
+        } else {
+            0.8
+        };
+
+        (value_uncertainty + frequency_deviation) / 2.0
     }
 
     /// Apply feedback to update ensemble weights
@@ -1309,6 +1341,9 @@ impl AnomalyProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::{
+        runtime as policy_runtime, PatternRule, PolicyAction, PolicyDefaults, PolicySnapshot,
+    };
 
     #[test]
     fn test_profile_creation() {
@@ -1382,5 +1417,34 @@ mod tests {
                 b
             );
         }
+    }
+
+    #[test]
+    fn test_policy_suppresses_detected_anomaly() {
+        policy_runtime().install_snapshot(PolicySnapshot {
+            version: "test-policy-suppress".to_string(),
+            created_at_unix: crate::policy::now_unix(),
+            rules: vec![PatternRule {
+                pattern_id: "suppress-entity-42".to_string(),
+                action: PolicyAction::Suppress,
+                entity_hashes: vec![42],
+                ttl_sec: 3600,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let mut profile = AnomalyProfile::default();
+        for i in 0..160 {
+            let _ = profile.process_with_hash(i * 50_000_000, 42, 100.0);
+        }
+
+        let signal = profile.process_with_hash(161 * 50_000_000, 42, 10000.0);
+        assert!(
+            !signal.is_anomaly,
+            "policy should suppress anomaly decision"
+        );
+
+        policy_runtime().install_snapshot(PolicySnapshot::default());
     }
 }

@@ -235,7 +235,7 @@ impl AdaptiveThreshold {
         let mad_thresh = self.calculate_mad_threshold();
 
         // Use median of the three methods (robust consensus)
-        let mut thresholds = vec![ewma_thresh, percentile_thresh, mad_thresh];
+        let mut thresholds = [ewma_thresh, percentile_thresh, mad_thresh];
         thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         thresholds[1] // Median

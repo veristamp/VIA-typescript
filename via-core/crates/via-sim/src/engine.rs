@@ -195,7 +195,7 @@ impl SimulationEngine {
 
     /// Resume the simulation
     pub fn resume(&mut self) {
-        if self.state == EngineState::Paused {
+        if self.state == EngineState::Paused || self.state == EngineState::Stopped {
             self.state = EngineState::Running;
         }
     }
@@ -207,6 +207,11 @@ impl SimulationEngine {
         self.scheduled.clear();
         self.ground_truth.reset();
         self.stats = EngineStats::default();
+    }
+
+    /// Clear all active scenarios
+    pub fn clear_scenarios(&mut self) {
+        self.scenarios.clear();
     }
 
     /// Add an immediate scenario (starts now)

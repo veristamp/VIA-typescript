@@ -7,6 +7,8 @@
 //! - Feedback loop for continuous improvement
 //! - Memory-bounded profile registry with LRU eviction
 //! - Checkpoint/recovery for Bun-managed persistence
+//! - Tier-2 HTTP forwarding for anomaly signals
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_ulonglong};
@@ -16,13 +18,19 @@ pub mod algo;
 pub mod checkpoint;
 pub mod engine;
 pub mod feedback;
+pub mod forwarder;
+pub mod policy;
 pub mod registry;
 pub mod signal;
 
 // Re-exports
 pub use checkpoint::{CheckpointError, CheckpointManager, CheckpointRequest, FullCheckpoint};
 pub use engine::{AnomalyProfile, AnomalyResult, ProfileConfig, SignalContext};
-pub use feedback::{FeedbackChannel, FeedbackEvent, FeedbackSource, FeedbackStats};
+pub use feedback::{
+    FeedbackChannel, FeedbackEvent, FeedbackLabelClass, FeedbackSource, FeedbackStats,
+};
+pub use forwarder::{ForwarderConfig, ForwarderStats, Tier1SignalV1, Tier2Forwarder};
+pub use policy::{PolicySnapshot, runtime as policy_runtime};
 pub use registry::{ProfileRegistry, RegistryConfig};
 pub use signal::{
     AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, NUM_DETECTORS, Severity,
