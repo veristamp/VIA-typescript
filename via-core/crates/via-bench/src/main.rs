@@ -9,6 +9,7 @@
 //!   via-bench compare results1.json results2.json  # Compare results
 
 use clap::{Parser, Subcommand};
+use via_bench::pipeline::{PipelineBenchmarkConfig, PipelineBenchmarkRunner, scenario_by_name};
 use via_bench::{BenchmarkConfig, BenchmarkRunner, scenarios};
 
 #[derive(Parser)]
@@ -63,6 +64,25 @@ enum Commands {
     /// Quick validation test
     Quick,
 
+    /// End-to-end pipeline benchmark (Tier-1 simulation+detect + Tier-2 correlation/evaluation)
+    Pipeline {
+        /// Tier-2 base URL
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        tier2_url: String,
+
+        /// Scenario profile: quick, mixed, security, performance, throughput
+        #[arg(long, default_value = "quick")]
+        scenario: String,
+
+        /// Duration override (minutes)
+        #[arg(short, long)]
+        duration: Option<u64>,
+
+        /// Anomaly send batch size to Tier-2
+        #[arg(long, default_value = "256")]
+        send_batch: usize,
+    },
+
     /// Compare benchmark results
     Compare {
         /// Result files to compare
@@ -113,6 +133,14 @@ fn main() {
         }
         Commands::Quick => {
             run_single_benchmark("quick", None, cli.output, batch_size);
+        }
+        Commands::Pipeline {
+            tier2_url,
+            scenario,
+            duration,
+            send_batch,
+        } => {
+            run_pipeline_benchmark(&tier2_url, &scenario, duration, send_batch, cli.output);
         }
         Commands::Compare { files, output } => {
             compare_results(&files, output);
@@ -260,6 +288,58 @@ fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: u
     if let Some(output_file) = output {
         let json = serde_json::to_string_pretty(&results).unwrap();
         std::fs::write(&output_file, json).expect("Failed to write results");
+    }
+}
+
+fn run_pipeline_benchmark(
+    tier2_url: &str,
+    scenario: &str,
+    duration: Option<u64>,
+    send_batch: usize,
+    output: Option<String>,
+) {
+    let mut benchmark = scenario_by_name(scenario);
+    if let Some(minutes) = duration {
+        benchmark.duration_minutes = minutes;
+    }
+
+    let cfg = PipelineBenchmarkConfig {
+        benchmark,
+        tier2_base_url: tier2_url.to_string(),
+        send_batch_size: send_batch.max(1),
+        ..Default::default()
+    };
+
+    println!(
+        "Running end-to-end pipeline benchmark against {}",
+        tier2_url
+    );
+    println!(
+        "Scenario: {} | duration={}m | send_batch={}",
+        cfg.benchmark.name, cfg.benchmark.duration_minutes, cfg.send_batch_size
+    );
+
+    let mut runner = match PipelineBenchmarkRunner::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to initialize pipeline benchmark runner: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    match runner.run(cfg) {
+        Ok(results) => {
+            let json = serde_json::to_string_pretty(&results).unwrap();
+            println!("{json}");
+            if let Some(output_file) = output {
+                std::fs::write(&output_file, json).expect("Failed to write pipeline results");
+                println!("Pipeline results saved to: {}", output_file);
+            }
+        }
+        Err(e) => {
+            eprintln!("Pipeline benchmark failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

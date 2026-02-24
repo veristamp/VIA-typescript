@@ -42,6 +42,17 @@ export class Tier2QueueService {
 
 	constructor(private readonly tier2Service: Tier2Service) {}
 
+	private formatError(error: unknown): string {
+		if (error instanceof Error) {
+			return `${error.name}: ${error.message}`;
+		}
+		try {
+			return JSON.stringify(error);
+		} catch {
+			return String(error);
+		}
+	}
+
 	start(): void {
 		if (this.flushTimer) {
 			return;
@@ -162,9 +173,10 @@ export class Tier2QueueService {
 			try {
 				await this.tier2Service.processAnomalyBatch(task.signals);
 				this.stats.processed += 1;
-			} catch (error) {
-				task.attempts += 1;
-				if (task.attempts < this.maxAttempts) {
+				} catch (error) {
+					const errorText = this.formatError(error);
+					task.attempts += 1;
+					if (task.attempts < this.maxAttempts) {
 					const jitterMs = Math.floor(Math.random() * 100);
 					const backoffMs =
 						settings.queue.retryBaseDelayMs *
@@ -174,21 +186,21 @@ export class Tier2QueueService {
 					this.queue.push(task);
 					this.stats.retried += 1;
 				} else {
-					this.stats.dlq += 1;
-					await saveDeadLetter(task.eventId, "processing_failed", {
-						error: String(error),
-						attempts: task.attempts,
-						age_sec: Math.max(
+						this.stats.dlq += 1;
+						await saveDeadLetter(task.eventId, "processing_failed", {
+							error: errorText,
+							attempts: task.attempts,
+							age_sec: Math.max(
 							0,
 							Math.floor(Date.now() / 1000) - task.enqueuedAt,
 						),
 					});
-					logger.error("Task moved to DLQ", {
-						eventId: task.eventId,
-						error: String(error),
-					});
+						logger.error("Task moved to DLQ", {
+							eventId: task.eventId,
+							error: errorText,
+						});
+					}
 				}
-			}
 		});
 
 		try {

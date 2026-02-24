@@ -2,6 +2,7 @@ import {
 	getTier2IncidentById,
 	listTier2Decisions,
 	listTier2Incidents,
+	listTier2IncidentsForRun,
 	saveTier2Decision,
 	upsertTier2Incident,
 } from "../db/registry";
@@ -23,6 +24,14 @@ export interface IncidentDecision {
 const POLICY_VERSION = "tier2-policy-v1";
 
 export class IncidentService {
+	private seedIncidentIdForEvent(event: CanonicalTier2Event): string {
+		const gtId = event.attributes.ground_truth_anomaly_id;
+		if (typeof gtId === "string" && gtId.length > 0) {
+			return `gt_${gtId}`;
+		}
+		return `evt_${event.eventId}`;
+	}
+
 	private resolveDecision(candidate: IncidentCandidate): IncidentDecision {
 		const confidence = Math.max(0, Math.min(1, candidate.confidence));
 		const status: IncidentStatus =
@@ -84,7 +93,7 @@ export class IncidentService {
 
 	async seedSingleEventIncident(events: CanonicalTier2Event[]): Promise<void> {
 		for (const event of events) {
-			const incidentId = `evt_${event.eventId}`;
+			const incidentId = this.seedIncidentIdForEvent(event);
 			const existing = await getTier2IncidentById(incidentId);
 			if (existing) {
 				continue;
@@ -101,6 +110,14 @@ export class IncidentService {
 				evidence: {
 					event_id: event.eventId,
 					primary_detector: event.primaryDetector,
+					ground_truth_anomaly_id:
+						typeof event.attributes.ground_truth_anomaly_id === "string"
+							? event.attributes.ground_truth_anomaly_id
+							: undefined,
+					benchmark_run_id:
+						typeof event.attributes.benchmark_run_id === "string"
+							? event.attributes.benchmark_run_id
+							: undefined,
 				},
 				policyVersion: POLICY_VERSION,
 			});
@@ -109,6 +126,10 @@ export class IncidentService {
 
 	async listIncidents(limit: number): Promise<unknown[]> {
 		return listTier2Incidents(limit);
+	}
+
+	async listIncidentsForRun(runId: string, limit: number): Promise<unknown[]> {
+		return listTier2IncidentsForRun(runId, limit);
 	}
 
 	async getIncident(incidentId: string): Promise<unknown> {

@@ -118,7 +118,6 @@ export class Tier2Service {
 			endTs,
 			normalized,
 		);
-		await this.incidents.seedSingleEventIncident(normalized);
 		await this.incidents.applyCandidates(candidates);
 	}
 }

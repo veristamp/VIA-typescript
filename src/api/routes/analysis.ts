@@ -125,6 +125,20 @@ app.get("/incidents", async (c) => {
 	return c.json({ incidents });
 });
 
+app.get("/incidents/run/:runId", async (c) => {
+	const incidentService = c.get("incidentService") as IncidentService;
+	const runId = c.req.param("runId");
+	if (!runId) {
+		return c.json({ error: "runId parameter is required" }, 400);
+	}
+	const parsed = Number(c.req.query("limit") ?? "20000");
+	const limit = Number.isFinite(parsed)
+		? Math.min(Math.max(parsed, 1), 100000)
+		: 20000;
+	const incidents = await incidentService.listIncidentsForRun(runId, limit);
+	return c.json({ incidents });
+});
+
 app.get("/incidents/:incidentId", async (c) => {
 	const incidentService = c.get("incidentService") as IncidentService;
 	const incidentId = c.req.param("incidentId");

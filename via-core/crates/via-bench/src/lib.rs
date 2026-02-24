@@ -13,6 +13,8 @@ use via_core::engine::AnomalyProfile;
 use via_core::signal::{AnomalySignal, DetectorId, NUM_DETECTORS};
 use via_sim::{LogRecord, SimulationEngine};
 
+pub mod pipeline;
+
 /// Benchmark configuration
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BenchmarkConfig {

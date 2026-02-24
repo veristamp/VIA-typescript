@@ -30,7 +30,11 @@ export class QdrantService {
 	private tier2Dim: number = 384;
 	private tier1CollectionPrefix: string = "via_tier1_monitor";
 	private tier2CollectionPrefix: string = "via_forensic_index_v2";
-	private embeddingUrl: string;
+	private embeddingBaseUrl: string;
+	private embeddingModel: string;
+	private embeddingDimension: number;
+	private embeddingUnavailableUntilMs = 0;
+	private embeddingDegradedLogged = false;
 	private embeddingCache = new Map<
 		string,
 		{ vector: number[]; expiresAt: number }
@@ -40,7 +44,17 @@ export class QdrantService {
 		this.client = new QdrantClient({
 			url: `http://${settings.qdrant.host}:${settings.qdrant.port}`,
 		});
-		this.embeddingUrl = process.env.EMBEDDING_URL || "http://localhost:8080";
+		const legacyUrl = process.env.EMBEDDING_URL;
+		this.embeddingBaseUrl =
+			process.env.EMBEDDING_BASE_URL ||
+			(legacyUrl ? legacyUrl.replace(/\/embeddings$/, "") : "") ||
+			"http://127.0.0.1:1234/v1";
+		this.embeddingModel =
+			process.env.EMBEDDING_MODEL || "text-embedding-nomic-embed-text-v1.5";
+		this.embeddingDimension = Number.parseInt(
+			process.env.EMBEDDING_DIMENSION || `${this.tier2Dim}`,
+			10,
+		);
 	}
 
 	private async mapWithConcurrency<T, R>(
@@ -99,24 +113,69 @@ export class QdrantService {
 	}
 
 	private async requestEmbeddingBatch(texts: string[]): Promise<number[][]> {
-		const response = await fetch(`${this.embeddingUrl}/embeddings`, {
+		const now = Date.now();
+		if (now < this.embeddingUnavailableUntilMs) {
+			throw new Error("embedding service temporarily unavailable");
+		}
+
+		const response = await fetch(`${this.embeddingBaseUrl}/embeddings`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ input: texts }),
+			body: JSON.stringify({
+				model: this.embeddingModel,
+				input: texts,
+				dimensions: this.embeddingDimension,
+			}),
 		});
 
 		if (!response.ok) {
+			this.embeddingUnavailableUntilMs = now + 5_000;
+			if (!this.embeddingDegradedLogged) {
+				logger.warn("Embedding service unavailable, using fallback", {
+					status: response.status,
+				});
+				this.embeddingDegradedLogged = true;
+			}
 			throw new Error(`embedding service returned ${response.status}`);
 		}
 
-		const data = (await response.json()) as { embeddings?: number[][] };
-		if (!Array.isArray(data.embeddings) || data.embeddings.length !== texts.length) {
-			throw new Error("embedding service returned invalid batch shape");
+		const data = (await response.json()) as {
+			data?: Array<{ embedding?: number[]; index?: number }>;
+			embeddings?: number[][];
+		};
+		this.embeddingUnavailableUntilMs = 0;
+		this.embeddingDegradedLogged = false;
+
+		const vectors = new Array<number[]>(texts.length);
+		if (data.data && data.data.length > 0) {
+			for (const row of data.data) {
+				if (
+					typeof row.index === "number" &&
+					row.index >= 0 &&
+					row.index < texts.length &&
+					row.embedding
+				) {
+					vectors[row.index] = this.normalizeEmbeddingDimensions(row.embedding);
+				}
+			}
+		} else if (data.embeddings && data.embeddings.length > 0) {
+			for (let i = 0; i < Math.min(data.embeddings.length, texts.length); i++) {
+				vectors[i] = this.normalizeEmbeddingDimensions(data.embeddings[i]);
+			}
 		}
-		return data.embeddings;
+
+		for (let i = 0; i < vectors.length; i++) {
+			if (!vectors[i]) {
+				vectors[i] = this.generateFallbackVector(texts[i]);
+			}
+		}
+		return vectors;
 	}
 
 	private async getEmbeddings(texts: string[]): Promise<number[][]> {
+		if (texts.length === 0) {
+			return [];
+		}
 		const vectors: number[][] = new Array(texts.length);
 		const unresolved: Array<{ text: string; indices: number[] }> = [];
 		const byNormalized = new Map<string, { text: string; indices: number[] }>();
@@ -413,17 +472,19 @@ export class QdrantService {
 				const denseVectors = await this.getEmbeddings(
 					collectionEvents.map((event) => event.textForEmbedding),
 				);
-				const points = collectionEvents.map((event, idx) => {
-					const sparseVector = this.generateSparseVector(event.textForEmbedding);
-					return {
-						id: this.generateId(),
-						vector: {
-							log_dense_vector: denseVectors[idx],
-							bm25_vector: sparseVector,
-						},
-						payload: event.payload,
-					};
-				});
+					const points = collectionEvents.map((event, idx) => {
+						const sparseVector = this.generateSparseVector(event.textForEmbedding);
+						return {
+							id: this.generateId(),
+							vector: {
+								log_dense_vector:
+									denseVectors[idx] ??
+									this.generateFallbackVector(event.textForEmbedding),
+								bm25_vector: sparseVector,
+							},
+							payload: event.payload,
+						};
+					});
 				await this.client.upsert(collection, {
 					points,
 					wait: false,
@@ -609,34 +670,77 @@ export class QdrantService {
 		if (cached) {
 			return cached;
 		}
+
+		const now = Date.now();
+		if (now < this.embeddingUnavailableUntilMs) {
+			return this.generateFallbackVector(text);
+		}
+
 		try {
-			const response = await fetch(`${this.embeddingUrl}/embeddings`, {
+			const response = await fetch(`${this.embeddingBaseUrl}/embeddings`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ input: text }),
+				body: JSON.stringify({
+					model: this.embeddingModel,
+					input: text,
+					dimensions: this.embeddingDimension,
+				}),
 			});
 
 			if (!response.ok) {
-				logger.warn("Embedding service unavailable, using fallback", {
-					status: response.status,
-				});
+				this.embeddingUnavailableUntilMs = now + 5_000;
+				if (!this.embeddingDegradedLogged) {
+					logger.warn("Embedding service unavailable, using fallback", {
+						status: response.status,
+					});
+					this.embeddingDegradedLogged = true;
+				}
 				const fallback = this.generateFallbackVector(text);
 				this.cacheEmbedding(text, fallback);
 				return fallback;
 			}
 
-			const data = (await response.json()) as { embeddings?: number[][] };
-			const vector = data.embeddings?.[0] || this.generateFallbackVector(text);
+			const data = (await response.json()) as {
+				data?: Array<{ embedding?: number[] }>;
+				embeddings?: number[][];
+			};
+			this.embeddingUnavailableUntilMs = 0;
+			this.embeddingDegradedLogged = false;
+
+			const openAiVector = data.data?.[0]?.embedding;
+			const legacyVector = data.embeddings?.[0];
+			const selected = openAiVector || legacyVector;
+			const vector = selected
+				? this.normalizeEmbeddingDimensions(selected)
+				: this.generateFallbackVector(text);
 			this.cacheEmbedding(text, vector);
 			return vector;
 		} catch (error) {
-			logger.warn("Embedding request failed, using fallback", {
-				error: String(error),
-			});
+			this.embeddingUnavailableUntilMs = now + 5_000;
+			if (!this.embeddingDegradedLogged) {
+				logger.warn("Embedding request failed, using fallback", {
+					error: String(error),
+				});
+				this.embeddingDegradedLogged = true;
+			}
 			const fallback = this.generateFallbackVector(text);
 			this.cacheEmbedding(text, fallback);
 			return fallback;
 		}
+	}
+
+	private normalizeEmbeddingDimensions(vector: number[]): number[] {
+		if (vector.length === this.tier2Dim) {
+			return vector;
+		}
+		if (vector.length > this.tier2Dim) {
+			return vector.slice(0, this.tier2Dim);
+		}
+		const padded = vector.slice();
+		while (padded.length < this.tier2Dim) {
+			padded.push(0);
+		}
+		return padded;
 	}
 
 	private generateFallbackVector(text: string): number[] {
@@ -660,21 +764,24 @@ export class QdrantService {
 		for (const word of words) {
 			freq.set(word, (freq.get(word) ?? 0) + 1);
 		}
-		const indices: number[] = [];
-		const values: number[] = [];
+		const indexWeight = new Map<number, number>();
 
 		for (const [word, count] of freq.entries()) {
 			const hash = Bun.hash.xxHash64(word);
 			const hashValue = Number(hash & 0xffffffffn);
-			indices.push(hashValue % 16384);
-			values.push(1 + count / Math.max(words.length, 1));
+			const idx = hashValue % 16384;
+			const weight = 1 + count / Math.max(words.length, 1);
+			indexWeight.set(idx, (indexWeight.get(idx) ?? 0) + weight);
 		}
+
+		const sorted = Array.from(indexWeight.entries()).sort((a, b) => a[0] - b[0]);
+		const indices = sorted.map(([idx]) => idx);
+		const values = sorted.map(([, weight]) => weight);
 
 		return { indices, values };
 	}
 
 	private generateId(): string {
-		const hash = Bun.hash.xxHash64(`${Date.now()}-${Math.random()}`);
-		return hash.toString(16);
+		return crypto.randomUUID();
 	}
 }

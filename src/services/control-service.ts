@@ -32,14 +32,19 @@ export class ControlService {
 	private suppressionCache: Map<string, number> = new Map();
 	private patchRegistry: Set<string> = new Set();
 	private ready: Promise<void> = Promise.resolve();
+	private initialized = false;
 
 	constructor(private readonly policyCompiler?: PolicyCompilerService) {
 		// Tables are initialized during application bootstrap, so defer DB reads.
 	}
 
 	async initialize(): Promise<void> {
+		if (this.initialized) {
+			return;
+		}
 		this.ready = this.loadPatches();
 		await this.ready;
+		this.initialized = true;
 	}
 
 	private async loadPatches(): Promise<void> {

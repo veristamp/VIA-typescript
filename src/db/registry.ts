@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { settings } from "../config/settings";
@@ -322,6 +322,17 @@ export async function listTier2Incidents(
 	limit: number,
 ): Promise<Tier2Incident[]> {
 	return db.query.tier2Incidents.findMany({
+		orderBy: [desc(schema.tier2Incidents.lastSeenTs)],
+		limit,
+	});
+}
+
+export async function listTier2IncidentsForRun(
+	benchmarkRunId: string,
+	limit: number,
+): Promise<Tier2Incident[]> {
+	return db.query.tier2Incidents.findMany({
+		where: sql`${schema.tier2Incidents.evidence} ->> 'benchmark_run_id' = ${benchmarkRunId}`,
 		orderBy: [desc(schema.tier2Incidents.lastSeenTs)],
 		limit,
 	});

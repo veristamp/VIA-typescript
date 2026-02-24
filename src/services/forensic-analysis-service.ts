@@ -19,6 +19,8 @@ export interface TriageResult {
 
 interface CandidateAccumulator {
 	memberPointIds: Set<string>;
+	groundTruthIds: Set<string>;
+	benchmarkRunIds: Set<string>;
 	firstSeenTs: number;
 	lastSeenTs: number;
 	severityMax: number;
@@ -103,6 +105,9 @@ export class ForensicAnalysisService {
 		seedEvidence: Record<string, unknown>,
 	): void {
 		const payload = (hit.payload || {}) as Record<string, unknown>;
+		const attrs = (payload.attributes || {}) as Record<string, unknown>;
+		const groundTruthIdRaw = attrs.ground_truth_anomaly_id;
+		const benchmarkRunIdRaw = attrs.benchmark_run_id;
 		const ts = this.extractTs(payload);
 		const severity = Number(payload.severity ?? 0);
 		const score = Number(payload.score ?? hit.score ?? 0);
@@ -110,8 +115,21 @@ export class ForensicAnalysisService {
 
 		const current = acc.get(incidentId);
 		if (!current) {
+			const groundTruthIds = new Set<string>();
+			if (typeof groundTruthIdRaw === "string" && groundTruthIdRaw.length > 0) {
+				groundTruthIds.add(groundTruthIdRaw);
+			}
+			const benchmarkRunIds = new Set<string>();
+			if (
+				typeof benchmarkRunIdRaw === "string" &&
+				benchmarkRunIdRaw.length > 0
+			) {
+				benchmarkRunIds.add(benchmarkRunIdRaw);
+			}
 			acc.set(incidentId, {
 				memberPointIds: new Set([pointId]),
+				groundTruthIds,
+				benchmarkRunIds,
 				firstSeenTs: ts,
 				lastSeenTs: ts,
 				severityMax: Number.isFinite(severity) ? severity : 0,
@@ -125,6 +143,12 @@ export class ForensicAnalysisService {
 		}
 
 		current.memberPointIds.add(pointId);
+		if (typeof groundTruthIdRaw === "string" && groundTruthIdRaw.length > 0) {
+			current.groundTruthIds.add(groundTruthIdRaw);
+		}
+		if (typeof benchmarkRunIdRaw === "string" && benchmarkRunIdRaw.length > 0) {
+			current.benchmarkRunIds.add(benchmarkRunIdRaw);
+		}
 		current.firstSeenTs = Math.min(current.firstSeenTs, ts);
 		current.lastSeenTs = Math.max(current.lastSeenTs, ts);
 		current.severityMax = Math.max(
@@ -234,7 +258,11 @@ export class ForensicAnalysisService {
 				severityMax: value.severityMax,
 				scoreMax: value.scoreMax,
 				entityKey: value.entityKey,
-				evidence: value.evidence,
+				evidence: {
+					...value.evidence,
+					ground_truth_anomaly_ids: Array.from(value.groundTruthIds),
+					benchmark_run_ids: Array.from(value.benchmarkRunIds),
+				},
 			});
 		}
 
@@ -267,7 +295,11 @@ export class ForensicAnalysisService {
 
 		// Seed single-event candidates so new events always show up in workflow.
 		const seededCandidates: IncidentCandidate[] = seedEvents.map((event) => ({
-			incidentId: `evt_${event.eventId}`,
+			incidentId:
+				typeof event.attributes.ground_truth_anomaly_id === "string" &&
+				event.attributes.ground_truth_anomaly_id.length > 0
+					? `gt_${event.attributes.ground_truth_anomaly_id}`
+					: `evt_${event.eventId}`,
 			memberPointIds: [event.eventId],
 			reason: "temporal",
 			confidence: Math.max(0.4, Math.min(1, event.confidence)),
@@ -279,6 +311,14 @@ export class ForensicAnalysisService {
 			evidence: {
 				event_id: event.eventId,
 				primary_detector: event.primaryDetector,
+				ground_truth_anomaly_id:
+					typeof event.attributes.ground_truth_anomaly_id === "string"
+						? event.attributes.ground_truth_anomaly_id
+						: null,
+				benchmark_run_id:
+					typeof event.attributes.benchmark_run_id === "string"
+						? event.attributes.benchmark_run_id
+						: null,
 			},
 		}));
 
