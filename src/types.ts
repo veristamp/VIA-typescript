@@ -1,3 +1,8 @@
+import type {
+	Tier1PolicyRule as ContractTier1PolicyRule,
+	Tier1PolicySnapshot as ContractTier1PolicySnapshot,
+} from "./modules/tier2/contracts/tier1-policy";
+
 export interface LogRecord {
 	id: string;
 	timestamp: number;
@@ -52,23 +57,5 @@ export interface IncidentCandidate {
 
 export type PolicyStatus = "draft" | "active" | "rolled_back";
 
-export interface Tier1PolicyRule {
-	pattern_id: string;
-	action: "suppress" | "boost";
-	entity_hashes?: string[];
-	primary_detector?: number;
-	min_confidence?: number;
-	score_scale?: number;
-	confidence_scale?: number;
-	ttl_sec: number;
-}
-
-export interface Tier1PolicySnapshot {
-	version: string;
-	created_at_unix: number;
-	rules: Tier1PolicyRule[];
-	defaults: {
-		score_scale: number;
-		confidence_scale: number;
-	};
-}
+export type Tier1PolicyRule = ContractTier1PolicyRule;
+export type Tier1PolicySnapshot = ContractTier1PolicySnapshot;

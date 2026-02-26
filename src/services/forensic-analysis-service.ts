@@ -1,4 +1,5 @@
-import { getIncidentGraph, saveIncidentGraph } from "../db/registry";
+import { tier2IncidentGraphRepository } from "../modules/tier2/adapters/registry-repositories";
+import type { Tier2IncidentGraphRepository } from "../modules/tier2/ports/repositories";
 import type { CanonicalTier2Event, IncidentCandidate } from "../types";
 import type { QdrantScoredPoint, QdrantService } from "./qdrant-service";
 
@@ -32,11 +33,10 @@ interface CandidateAccumulator {
 }
 
 export class ForensicAnalysisService {
-	private qdrantService: QdrantService;
-
-	constructor(qdrantService: QdrantService) {
-		this.qdrantService = qdrantService;
-	}
+	constructor(
+		private readonly qdrantService: QdrantService,
+		private readonly incidentGraphRepository: Tier2IncidentGraphRepository = tier2IncidentGraphRepository,
+	) {}
 
 	async findTier2Clusters(
 		startTs: number,
@@ -275,7 +275,7 @@ export class ForensicAnalysisService {
 
 		for (const candidate of candidates) {
 			for (const pointId of candidate.memberPointIds) {
-				await saveIncidentGraph(
+				await this.incidentGraphRepository.saveIncidentGraph(
 					candidate.incidentId,
 					pointId,
 					candidate.reason,
@@ -326,7 +326,8 @@ export class ForensicAnalysisService {
 	}
 
 	async getIncidentGraph(metaIncidentId: string) {
-		const graph = await getIncidentGraph(metaIncidentId);
+		const graph =
+			await this.incidentGraphRepository.getIncidentGraph(metaIncidentId);
 		return graph;
 	}
 }

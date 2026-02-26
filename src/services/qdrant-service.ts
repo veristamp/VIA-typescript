@@ -2,12 +2,6 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 import { settings } from "../config/settings";
 import { logger } from "../utils/logger";
 
-export interface QdrantPoint {
-	id: string;
-	vector: number[];
-	payload: Record<string, unknown>;
-}
-
 export interface Tier2Event {
 	textForEmbedding: string;
 	payload: Record<string, unknown>;
@@ -26,9 +20,7 @@ type PayloadIndexFieldSchema = Parameters<
 
 export class QdrantService {
 	private client: QdrantClient;
-	private tier1Dim: number = 64;
 	private tier2Dim: number = 384;
-	private tier1CollectionPrefix: string = "via_tier1_monitor";
 	private tier2CollectionPrefix: string = "via_forensic_index_v2";
 	private embeddingBaseUrl: string;
 	private embeddingModel: string;
@@ -213,7 +205,11 @@ export class QdrantService {
 				const batchTexts = chunk.map((item) => item.text);
 				let batchVectors: number[][] | null = null;
 
-				for (let attempt = 0; attempt <= settings.embedding.maxRetries; attempt++) {
+				for (
+					let attempt = 0;
+					attempt <= settings.embedding.maxRetries;
+					attempt++
+				) {
 					try {
 						batchVectors = await this.requestEmbeddingBatch(batchTexts);
 						break;
@@ -228,11 +224,14 @@ export class QdrantService {
 				}
 
 				if (!batchVectors) {
-					batchVectors = batchTexts.map((text) => this.generateFallbackVector(text));
+					batchVectors = batchTexts.map((text) =>
+						this.generateFallbackVector(text),
+					);
 				}
 
 				chunk.forEach((item, idx) => {
-					const vector = batchVectors?.[idx] || this.generateFallbackVector(item.text);
+					const vector =
+						batchVectors?.[idx] || this.generateFallbackVector(item.text);
 					this.cacheEmbedding(item.text, vector);
 					for (const originalIndex of item.indices) {
 						vectors[originalIndex] = vector;
@@ -242,14 +241,6 @@ export class QdrantService {
 		);
 
 		return vectors;
-	}
-
-	get tier1Dimension(): number {
-		return this.tier1Dim;
-	}
-
-	get tier2Dimension(): number {
-		return this.tier2Dim;
 	}
 
 	private getDailyCollectionName(prefix: string, ts: number): string {
@@ -306,45 +297,10 @@ export class QdrantService {
 		}
 	}
 
-	private async ensureTier1Collection(): Promise<void> {
-		try {
-			await this.client.getCollection(this.tier1CollectionPrefix);
-			return;
-		} catch (error) {
-			if (!this.isNotFoundError(error)) {
-				throw error;
-			}
-		}
-
-		logger.info("Creating Tier-1 collection", {
-			collection: this.tier1CollectionPrefix,
-		});
-		await this.client.createCollection(this.tier1CollectionPrefix, {
-			vectors: {
-				size: this.tier1Dim,
-				distance: "Dot",
-			},
-			quantization_config: {
-				binary: {
-					always_ram: true,
-				},
-			},
-			replication_factor: 1,
-			shard_number: 1,
-		});
-	}
-
 	async setupCollections(): Promise<void> {
 		logger.info("Ensuring Qdrant collections");
 
 		try {
-			await this.ensureTier1Collection();
-			await this.ensurePayloadIndex(
-				this.tier1CollectionPrefix,
-				"ts",
-				"integer",
-			);
-
 			const todayTs = Math.floor(Date.now() / 1000);
 			const todayCollection = this.getDailyCollectionName(
 				this.tier2CollectionPrefix,
@@ -420,25 +376,6 @@ export class QdrantService {
 		}
 	}
 
-	async upsertTier1Points(points: QdrantPoint[]): Promise<number> {
-		if (!points || points.length === 0) {
-			return 0;
-		}
-
-		const qdrantPoints = points.map((pt) => ({
-			id: pt.id,
-			vector: pt.vector,
-			payload: pt.payload,
-		}));
-
-		await this.client.upsert(this.tier1CollectionPrefix, {
-			points: qdrantPoints,
-			wait: false,
-		});
-
-		return points.length;
-	}
-
 	async ingestToTier2(events: Tier2Event[]): Promise<void> {
 		if (events.length === 0) return;
 
@@ -472,87 +409,27 @@ export class QdrantService {
 				const denseVectors = await this.getEmbeddings(
 					collectionEvents.map((event) => event.textForEmbedding),
 				);
-					const points = collectionEvents.map((event, idx) => {
-						const sparseVector = this.generateSparseVector(event.textForEmbedding);
-						return {
-							id: this.generateId(),
-							vector: {
-								log_dense_vector:
-									denseVectors[idx] ??
-									this.generateFallbackVector(event.textForEmbedding),
-								bm25_vector: sparseVector,
-							},
-							payload: event.payload,
-						};
-					});
+				const points = collectionEvents.map((event, idx) => {
+					const sparseVector = this.generateSparseVector(
+						event.textForEmbedding,
+					);
+					return {
+						id: this.generateId(),
+						vector: {
+							log_dense_vector:
+								denseVectors[idx] ??
+								this.generateFallbackVector(event.textForEmbedding),
+							bm25_vector: sparseVector,
+						},
+						payload: event.payload,
+					};
+				});
 				await this.client.upsert(collection, {
 					points,
 					wait: false,
 				});
 			},
 		);
-	}
-
-	async getPointsFromTier1(startTs: number, endTs: number): Promise<unknown[]> {
-		try {
-			const result = await this.client.scroll(this.tier1CollectionPrefix, {
-				limit: 100000,
-				with_payload: true,
-				with_vector: true,
-				filter: {
-					must: [
-						{
-							key: "ts",
-							range: {
-								gte: startTs,
-								lte: endTs,
-							},
-						},
-					],
-				},
-			});
-
-			const points = (result as { points?: unknown[] })?.points || [];
-
-			return points;
-		} catch (error) {
-			logger.error("Error getting points from Tier 1", error);
-			return [];
-		}
-	}
-
-	async getHistoricalBaseline(
-		windowStartTs: number,
-		sampleSize: number = 10000,
-	): Promise<unknown[]> {
-		try {
-			const result = await this.client.scroll(this.tier1CollectionPrefix, {
-				limit: sampleSize,
-				with_payload: true,
-				with_vector: true,
-				order_by: {
-					key: "ts",
-					direction: "desc",
-				},
-				filter: {
-					must: [
-						{
-							key: "ts",
-							range: {
-								lt: windowStartTs,
-							},
-						},
-					],
-				},
-			});
-
-			const points = (result as { points?: unknown[] })?.points || [];
-
-			return points;
-		} catch (error) {
-			logger.error("Error getting historical baseline", error);
-			return [];
-		}
 	}
 
 	async findTier2Clusters(
@@ -758,7 +635,10 @@ export class QdrantService {
 		return vector;
 	}
 
-	private generateSparseVector(text: string): { indices: number[]; values: number[] } {
+	private generateSparseVector(text: string): {
+		indices: number[];
+		values: number[];
+	} {
 		const words = text.toLowerCase().split(/\s+/);
 		const freq = new Map<string, number>();
 		for (const word of words) {
@@ -774,7 +654,9 @@ export class QdrantService {
 			indexWeight.set(idx, (indexWeight.get(idx) ?? 0) + weight);
 		}
 
-		const sorted = Array.from(indexWeight.entries()).sort((a, b) => a[0] - b[0]);
+		const sorted = Array.from(indexWeight.entries()).sort(
+			(a, b) => a[0] - b[0],
+		);
 		const indices = sorted.map(([idx]) => idx);
 		const values = sorted.map(([, weight]) => weight);
 

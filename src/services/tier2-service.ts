@@ -1,22 +1,12 @@
+import {
+	normalizeTier1Severity,
+	type Tier1AnomalySignalV1,
+} from "../modules/tier2/contracts/tier1-signal";
 import type { CanonicalTier2Event } from "../types";
 import { logger } from "../utils/logger";
 import type { ForensicAnalysisService } from "./forensic-analysis-service";
 import type { IncidentService } from "./incident-service";
 import type { QdrantService } from "./qdrant-service";
-
-export interface Tier1AnomalySignalV1 {
-	event_id?: string;
-	schema_version: number;
-	entity_hash: string;
-	timestamp: number | string;
-	score: number;
-	severity: number;
-	primary_detector: number;
-	detectors_fired: number;
-	confidence: number;
-	detector_scores: number[];
-	attributes?: Record<string, unknown>;
-}
 
 export type IncomingAnomalySignal = Tier1AnomalySignalV1;
 
@@ -52,6 +42,10 @@ export class Tier2Service {
 
 	private normalizeSignal(signal: IncomingAnomalySignal): CanonicalTier2Event {
 		const timestamp = this.normalizeToUnixSeconds(signal.timestamp);
+		const severity = normalizeTier1Severity(
+			signal.severity,
+			signal.schema_version,
+		);
 		return {
 			eventId: this.computeEventId(signal, timestamp),
 			schemaVersion: signal.schema_version,
@@ -59,7 +53,7 @@ export class Tier2Service {
 			entityId: `hash:${signal.entity_hash}`,
 			timestamp,
 			score: signal.score,
-			severity: signal.severity,
+			severity,
 			primaryDetector: signal.primary_detector,
 			detectorsFired: signal.detectors_fired,
 			confidence: signal.confidence,

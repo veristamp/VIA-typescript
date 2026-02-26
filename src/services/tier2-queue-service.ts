@@ -1,5 +1,7 @@
 import { settings } from "../config/settings";
-import { saveDeadLetter } from "../db/registry";
+import { tier2DeadLetterRepository } from "../modules/tier2/adapters/registry-repositories";
+import { normalizeTier1Severity } from "../modules/tier2/contracts/tier1-signal";
+import type { Tier2DeadLetterRepository } from "../modules/tier2/ports/repositories";
 import { logger } from "../utils/logger";
 import type { IncomingAnomalySignal, Tier2Service } from "./tier2-service";
 
@@ -40,7 +42,10 @@ export class Tier2QueueService {
 		inFlight: 0,
 	};
 
-	constructor(private readonly tier2Service: Tier2Service) {}
+	constructor(
+		private readonly tier2Service: Tier2Service,
+		private readonly deadLetters: Tier2DeadLetterRepository = tier2DeadLetterRepository,
+	) {}
 
 	private formatError(error: unknown): string {
 		if (error instanceof Error) {
@@ -94,7 +99,7 @@ export class Tier2QueueService {
 
 		if (this.queue.length >= this.maxSize) {
 			this.stats.dropped += 1;
-			void saveDeadLetter(eventId, "queue_full", {
+			void this.deadLetters.saveDeadLetter(eventId, "queue_full", {
 				signals_count: signals.length,
 			});
 			return { accepted: false, eventId, reason: "queue_full" };
@@ -117,7 +122,11 @@ export class Tier2QueueService {
 		signals: IncomingAnomalySignal[],
 	): "critical" | "normal" {
 		const maxSeverity = signals.reduce(
-			(acc, signal) => Math.max(acc, signal.severity),
+			(acc, signal) =>
+				Math.max(
+					acc,
+					normalizeTier1Severity(signal.severity, signal.schema_version),
+				),
 			0,
 		);
 		return maxSeverity >= 0.85 ? "critical" : "normal";
@@ -173,10 +182,10 @@ export class Tier2QueueService {
 			try {
 				await this.tier2Service.processAnomalyBatch(task.signals);
 				this.stats.processed += 1;
-				} catch (error) {
-					const errorText = this.formatError(error);
-					task.attempts += 1;
-					if (task.attempts < this.maxAttempts) {
+			} catch (error) {
+				const errorText = this.formatError(error);
+				task.attempts += 1;
+				if (task.attempts < this.maxAttempts) {
 					const jitterMs = Math.floor(Math.random() * 100);
 					const backoffMs =
 						settings.queue.retryBaseDelayMs *
@@ -186,21 +195,25 @@ export class Tier2QueueService {
 					this.queue.push(task);
 					this.stats.retried += 1;
 				} else {
-						this.stats.dlq += 1;
-						await saveDeadLetter(task.eventId, "processing_failed", {
+					this.stats.dlq += 1;
+					await this.deadLetters.saveDeadLetter(
+						task.eventId,
+						"processing_failed",
+						{
 							error: errorText,
 							attempts: task.attempts,
 							age_sec: Math.max(
-							0,
-							Math.floor(Date.now() / 1000) - task.enqueuedAt,
-						),
+								0,
+								Math.floor(Date.now() / 1000) - task.enqueuedAt,
+							),
+						},
+					);
+					logger.error("Task moved to DLQ", {
+						eventId: task.eventId,
+						error: errorText,
 					});
-						logger.error("Task moved to DLQ", {
-							eventId: task.eventId,
-							error: errorText,
-						});
-					}
 				}
+			}
 		});
 
 		try {

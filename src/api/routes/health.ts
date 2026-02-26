@@ -2,7 +2,7 @@ import { Hono } from "hono";
 
 const app = new Hono();
 const SERVICE_VERSION = "2.2.0";
-const SIGNAL_SCHEMA_VERSION = 2;
+const SIGNAL_SCHEMA_VERSION = 1;
 
 app.get("/", (c) => {
 	return c.json({

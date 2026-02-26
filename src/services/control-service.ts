@@ -1,15 +1,5 @@
-import {
-	activateTier1Policy,
-	deletePatch,
-	getCurrentActivePolicy,
-	getActivePatches,
-	getAllRules,
-	getTier1PolicyByVersion,
-	listTier1Policies,
-	listTier2Incidents,
-	patchAnomaly,
-	upsertTier1PolicyArtifact,
-} from "../db/registry";
+import { tier2ControlRepository } from "../modules/tier2/adapters/registry-repositories";
+import type { Tier2ControlRepository } from "../modules/tier2/ports/repositories";
 import type { Tier1PolicySnapshot } from "../types";
 import { logger } from "../utils/logger";
 import type {
@@ -34,7 +24,10 @@ export class ControlService {
 	private ready: Promise<void> = Promise.resolve();
 	private initialized = false;
 
-	constructor(private readonly policyCompiler?: PolicyCompilerService) {
+	constructor(
+		private readonly policyCompiler?: PolicyCompilerService,
+		private readonly repository: Tier2ControlRepository = tier2ControlRepository,
+	) {
 		// Tables are initialized during application bootstrap, so defer DB reads.
 	}
 
@@ -48,7 +41,7 @@ export class ControlService {
 	}
 
 	private async loadPatches(): Promise<void> {
-		const patches = await getActivePatches();
+		const patches = await this.repository.getActivePatches();
 		this.patchRegistry = new Set(patches.map((p) => p.rhythmHash));
 		logger.info("Loaded active control patches", {
 			count: this.patchRegistry.size,
@@ -69,13 +62,13 @@ export class ControlService {
 		reason: string,
 		_contextLogs: string[],
 	): Promise<void> {
-		await patchAnomaly(rhythmHash, reason);
+		await this.repository.patchAnomaly(rhythmHash, reason);
 		this.patchRegistry.add(rhythmHash);
 		logger.info("Patched anomaly", { rhythmHash, reason });
 	}
 
 	async deletePatch(rhythmHash: string): Promise<void> {
-		await deletePatch(rhythmHash);
+		await this.repository.deletePatch(rhythmHash);
 		this.patchRegistry.delete(rhythmHash);
 		logger.info("Deleted patch", { rhythmHash });
 	}
@@ -101,7 +94,7 @@ export class ControlService {
 	}
 
 	async getAllRules() {
-		const patches = await getAllRules();
+		const patches = await this.repository.getAllRules();
 		const suppressions: Array<{ rhythmHash: string; expiresAt: number }> = [];
 
 		// Get temporary suppressions from cache
@@ -122,10 +115,10 @@ export class ControlService {
 		if (!this.policyCompiler) {
 			throw new Error("policy compiler is not configured");
 		}
-		const incidents = await listTier2Incidents(limit);
+		const incidents = await this.repository.listTier2Incidents(limit);
 		const artifact = this.policyCompiler.compile(incidents);
 
-		await upsertTier1PolicyArtifact({
+		await this.repository.upsertTier1PolicyArtifact({
 			policyVersion: artifact.policyVersion,
 			status: "draft",
 			compiledJson: artifact.snapshot as unknown as Record<string, unknown>,
@@ -141,25 +134,22 @@ export class ControlService {
 	}
 
 	async publishPolicy(policyVersion: string): Promise<void> {
-		const policy = await getTier1PolicyByVersion(policyVersion);
+		const policy = await this.repository.getTier1PolicyByVersion(policyVersion);
 		if (!policy) {
 			throw new Error(`policy not found: ${policyVersion}`);
 		}
-		await activateTier1Policy(policyVersion);
+		await this.repository.activateTier1Policy(policyVersion);
 		logger.info("Published Tier-1 policy", { policyVersion });
 	}
 
-	async rollbackPolicy(
-		targetVersion: string,
-		reason: string,
-	): Promise<string> {
-		const target = await getTier1PolicyByVersion(targetVersion);
+	async rollbackPolicy(targetVersion: string, reason: string): Promise<string> {
+		const target = await this.repository.getTier1PolicyByVersion(targetVersion);
 		if (!target) {
 			throw new Error(`policy not found: ${targetVersion}`);
 		}
 
 		const rollbackVersion = `${targetVersion}-rollback-${Math.floor(Date.now() / 1000)}`;
-		await upsertTier1PolicyArtifact({
+		await this.repository.upsertTier1PolicyArtifact({
 			policyVersion: rollbackVersion,
 			status: "active",
 			compiledJson: target.compiledJson as Record<string, unknown>,
@@ -169,7 +159,7 @@ export class ControlService {
 			},
 			rollbackOf: targetVersion,
 		});
-		await activateTier1Policy(rollbackVersion);
+		await this.repository.activateTier1Policy(rollbackVersion);
 
 		logger.warn("Rolled back Tier-1 policy", {
 			fromVersion: targetVersion,
@@ -180,7 +170,7 @@ export class ControlService {
 	}
 
 	async getCurrentPolicy(): Promise<Tier1PolicySnapshot | null> {
-		const active = await getCurrentActivePolicy();
+		const active = await this.repository.getCurrentActivePolicy();
 		if (!active) {
 			return null;
 		}
@@ -190,7 +180,7 @@ export class ControlService {
 	async getPolicyByVersion(
 		policyVersion: string,
 	): Promise<Tier1PolicySnapshot | null> {
-		const policy = await getTier1PolicyByVersion(policyVersion);
+		const policy = await this.repository.getTier1PolicyByVersion(policyVersion);
 		if (!policy) {
 			return null;
 		}
@@ -198,6 +188,6 @@ export class ControlService {
 	}
 
 	async listPolicies(limit: number = 50) {
-		return listTier1Policies(limit);
+		return this.repository.listTier1Policies(limit);
 	}
 }

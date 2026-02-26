@@ -50,6 +50,7 @@ pub struct PipelineBenchmarkResults {
 
     pub throughput_eps: f64,
     pub cost_per_10k_events_seconds: f64,
+    pub anomaly_breakdown: Vec<AnomalyDetectionBreakdown>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -65,6 +66,32 @@ struct Tier2Signal {
     confidence: f64,
     detector_scores: Vec<f64>,
     attributes: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AnomalyDetectionBreakdown {
+    pub anomaly_id: String,
+    pub scenario: String,
+    pub scheduled_start_sec: u64,
+    pub scheduled_duration_sec: u64,
+    pub ground_truth_events: u64,
+    pub detected_events: u64,
+    pub missed_events: u64,
+    pub recall: f64,
+}
+
+#[derive(Clone, Debug)]
+struct ScheduledAnomalyManifest {
+    anomaly_id: String,
+    scenario: String,
+    start_time_sec: u64,
+    duration_sec: u64,
+}
+
+#[derive(Default, Clone, Debug)]
+struct AnomalyEventStats {
+    ground_truth_events: u64,
+    detected_events: u64,
 }
 
 pub struct PipelineBenchmarkRunner {
@@ -191,6 +218,7 @@ impl PipelineBenchmarkRunner {
         latencies_micros: &mut Vec<u64>,
         counts: &mut DetectionCounts,
         gt_ids_from_logs: &mut HashSet<String>,
+        anomaly_stats: &mut HashMap<String, AnomalyEventStats>,
     ) {
         let start = Instant::now();
 
@@ -208,6 +236,11 @@ impl PipelineBenchmarkRunner {
             counts.gt_events += 1;
             if let Some(id) = &log.anomalyId {
                 gt_ids_from_logs.insert(id.clone());
+                let stats = anomaly_stats.entry(id.clone()).or_default();
+                stats.ground_truth_events += 1;
+                if signal.is_anomaly {
+                    stats.detected_events += 1;
+                }
             }
         }
 
@@ -254,6 +287,40 @@ impl PipelineBenchmarkRunner {
         counts.sent += 1;
     }
 
+    fn build_anomaly_breakdown(
+        manifests: &[ScheduledAnomalyManifest],
+        anomaly_stats: &HashMap<String, AnomalyEventStats>,
+    ) -> Vec<AnomalyDetectionBreakdown> {
+        manifests
+            .iter()
+            .map(|manifest| {
+                let stats = anomaly_stats
+                    .get(&manifest.anomaly_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let missed_events = stats
+                    .ground_truth_events
+                    .saturating_sub(stats.detected_events);
+                let recall = if stats.ground_truth_events > 0 {
+                    stats.detected_events as f64 / stats.ground_truth_events as f64
+                } else {
+                    0.0
+                };
+
+                AnomalyDetectionBreakdown {
+                    anomaly_id: manifest.anomaly_id.clone(),
+                    scenario: manifest.scenario.clone(),
+                    scheduled_start_sec: manifest.start_time_sec,
+                    scheduled_duration_sec: manifest.duration_sec,
+                    ground_truth_events: stats.ground_truth_events,
+                    detected_events: stats.detected_events,
+                    missed_events,
+                    recall,
+                }
+            })
+            .collect()
+    }
+
     pub fn run(
         &mut self,
         cfg: PipelineBenchmarkConfig,
@@ -263,10 +330,20 @@ impl PipelineBenchmarkRunner {
         let mut engine = SimulationEngine::new();
         engine.start(&cfg.benchmark.base_scenario);
 
+        let mut anomaly_manifest: Vec<ScheduledAnomalyManifest> = Vec::new();
         for anomaly in &cfg.benchmark.anomalies {
             let start_offset_ns = anomaly.start_time_sec * 1_000_000_000;
             let duration_ns = anomaly.duration_sec * 1_000_000_000;
-            let _ = engine.schedule_anomaly(&anomaly.scenario, start_offset_ns, duration_ns);
+            if let Some(anomaly_id) =
+                engine.schedule_anomaly(&anomaly.scenario, start_offset_ns, duration_ns)
+            {
+                anomaly_manifest.push(ScheduledAnomalyManifest {
+                    anomaly_id,
+                    scenario: anomaly.scenario.clone(),
+                    start_time_sec: anomaly.start_time_sec,
+                    duration_sec: anomaly.duration_sec,
+                });
+            }
         }
 
         let start = Instant::now();
@@ -279,6 +356,7 @@ impl PipelineBenchmarkRunner {
         let mut latencies_micros: Vec<u64> = Vec::new();
         let mut pending_signals: Vec<Tier2Signal> = Vec::with_capacity(cfg.send_batch_size);
         let mut gt_ids_from_logs: HashSet<String> = HashSet::new();
+        let mut anomaly_stats: HashMap<String, AnomalyEventStats> = HashMap::new();
 
         for _ in 0..total_ticks {
             let batch = engine.tick(tick_ns);
@@ -294,6 +372,7 @@ impl PipelineBenchmarkRunner {
                             &mut latencies_micros,
                             &mut counts,
                             &mut gt_ids_from_logs,
+                            &mut anomaly_stats,
                         );
 
                         if pending_signals.len() >= cfg.send_batch_size {
@@ -327,6 +406,8 @@ impl PipelineBenchmarkRunner {
 
         let (detection_precision, detection_recall, detection_f1) =
             calculate_metrics(counts.tp, counts.fp, counts.fn_);
+        let anomaly_breakdown =
+            Self::build_anomaly_breakdown(&anomaly_manifest, &anomaly_stats);
 
         Ok(PipelineBenchmarkResults {
             run_id,
@@ -352,6 +433,7 @@ impl PipelineBenchmarkRunner {
             } else {
                 0.0
             },
+            anomaly_breakdown,
         })
     }
 }

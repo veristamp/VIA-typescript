@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { getLatestDeadLetters } from "../../db/registry";
+import { tier2DeadLetterRepository } from "../../modules/tier2/adapters/registry-repositories";
 import type { ForensicAnalysisService } from "../../services/forensic-analysis-service";
 import type { IncidentService } from "../../services/incident-service";
 import type { Tier2QueueService } from "../../services/tier2-queue-service";
@@ -162,7 +162,8 @@ app.get("/pipeline/dead-letters", async (c) => {
 	const limit = Number.isFinite(parsed)
 		? Math.min(Math.max(parsed, 1), 500)
 		: 50;
-	const deadLetters = await getLatestDeadLetters(limit);
+	const deadLetters =
+		await tier2DeadLetterRepository.getLatestDeadLetters(limit);
 	return c.json({ dead_letters: deadLetters });
 });
 

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { z } from "zod";
+import { Tier1V1AnomalyBatchSchema } from "../../modules/tier2/contracts/tier1-signal";
 import type { Tier2QueueService } from "../../services/tier2-queue-service";
 import { logger } from "../../utils/logger";
 
@@ -11,24 +11,6 @@ declare module "hono" {
 	}
 }
 
-const Tier1V1SignalSchema = z.object({
-	event_id: z.string().min(1).optional(),
-	schema_version: z.number().int(),
-	entity_hash: z.string().min(1),
-	timestamp: z.union([z.number(), z.string().min(1)]),
-	score: z.number(),
-	severity: z.number(),
-	primary_detector: z.number().int(),
-	detectors_fired: z.number().int(),
-	confidence: z.number(),
-	detector_scores: z.array(z.number()),
-	attributes: z.record(z.string(), z.unknown()).optional(),
-});
-
-const AnomalyBatchSchema = z.object({
-	signals: z.array(Tier1V1SignalSchema).min(1),
-});
-
 app.post("/tier2/anomalies", async (c) => {
 	const queue = c.get("tier2QueueService") as Tier2QueueService;
 	const body = await c.req.json().catch(() => null);
@@ -36,7 +18,7 @@ app.post("/tier2/anomalies", async (c) => {
 		return c.json({ error: "Invalid JSON body" }, 400);
 	}
 
-	const result = AnomalyBatchSchema.safeParse(body);
+	const result = Tier1V1AnomalyBatchSchema.safeParse(body);
 	if (!result.success) {
 		return c.json(
 			{ error: "Invalid anomaly batch", details: result.error },

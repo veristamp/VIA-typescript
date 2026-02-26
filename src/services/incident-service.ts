@@ -1,16 +1,7 @@
-import {
-	getTier2IncidentById,
-	listTier2Decisions,
-	listTier2Incidents,
-	listTier2IncidentsForRun,
-	saveTier2Decision,
-	upsertTier2Incident,
-} from "../db/registry";
-import type {
-	CanonicalTier2Event,
-	IncidentCandidate,
-	IncidentStatus,
-} from "../types";
+import { tier2IncidentRepository } from "../modules/tier2/adapters/registry-repositories";
+import { resolveIncidentDecision } from "../modules/tier2/domain/incident-decision";
+import type { Tier2IncidentRepository } from "../modules/tier2/ports/repositories";
+import type { IncidentCandidate, IncidentStatus } from "../types";
 import { logger } from "../utils/logger";
 
 export interface IncidentDecision {
@@ -24,28 +15,18 @@ export interface IncidentDecision {
 const POLICY_VERSION = "tier2-policy-v1";
 
 export class IncidentService {
-	private seedIncidentIdForEvent(event: CanonicalTier2Event): string {
-		const gtId = event.attributes.ground_truth_anomaly_id;
-		if (typeof gtId === "string" && gtId.length > 0) {
-			return `gt_${gtId}`;
-		}
-		return `evt_${event.eventId}`;
-	}
+	constructor(
+		private readonly repository: Tier2IncidentRepository = tier2IncidentRepository,
+	) {}
 
 	private resolveDecision(candidate: IncidentCandidate): IncidentDecision {
-		const confidence = Math.max(0, Math.min(1, candidate.confidence));
-		const status: IncidentStatus =
-			candidate.severityMax >= 0.9 || candidate.scoreMax >= 0.95
-				? "escalated"
-				: candidate.memberPointIds.length >= 3 && confidence >= 0.8
-					? "merged"
-					: "new";
+		const resolved = resolveIncidentDecision(candidate);
 
 		return {
 			incidentId: candidate.incidentId,
-			status,
+			status: resolved.status,
 			reason: `reason=${candidate.reason};members=${candidate.memberPointIds.length};severity_max=${candidate.severityMax.toFixed(3)};score_max=${candidate.scoreMax.toFixed(3)}`,
-			confidence,
+			confidence: resolved.confidence,
 			policyVersion: POLICY_VERSION,
 		};
 	}
@@ -58,7 +39,7 @@ export class IncidentService {
 		for (const candidate of candidates) {
 			const decision = this.resolveDecision(candidate);
 			const confidencePct = Math.round(decision.confidence * 100);
-			await upsertTier2Incident({
+			await this.repository.upsertIncident({
 				incidentId: decision.incidentId,
 				status: decision.status,
 				entityKey: candidate.entityKey,
@@ -74,7 +55,7 @@ export class IncidentService {
 				},
 				policyVersion: decision.policyVersion,
 			});
-			await saveTier2Decision(
+			await this.repository.saveDecision(
 				decision.incidentId,
 				decision.status,
 				decision.reason,
@@ -91,53 +72,20 @@ export class IncidentService {
 		return decisions;
 	}
 
-	async seedSingleEventIncident(events: CanonicalTier2Event[]): Promise<void> {
-		for (const event of events) {
-			const incidentId = this.seedIncidentIdForEvent(event);
-			const existing = await getTier2IncidentById(incidentId);
-			if (existing) {
-				continue;
-			}
-			await upsertTier2Incident({
-				incidentId,
-				status: "new",
-				entityKey: event.entityId,
-				firstSeenTs: event.timestamp,
-				lastSeenTs: event.timestamp,
-				severityMaxPct: Math.round(event.severity * 100),
-				scoreMaxPct: Math.round(event.score * 100),
-				confidencePct: Math.round(event.confidence * 100),
-				evidence: {
-					event_id: event.eventId,
-					primary_detector: event.primaryDetector,
-					ground_truth_anomaly_id:
-						typeof event.attributes.ground_truth_anomaly_id === "string"
-							? event.attributes.ground_truth_anomaly_id
-							: undefined,
-					benchmark_run_id:
-						typeof event.attributes.benchmark_run_id === "string"
-							? event.attributes.benchmark_run_id
-							: undefined,
-				},
-				policyVersion: POLICY_VERSION,
-			});
-		}
-	}
-
 	async listIncidents(limit: number): Promise<unknown[]> {
-		return listTier2Incidents(limit);
+		return this.repository.listIncidents(limit);
 	}
 
 	async listIncidentsForRun(runId: string, limit: number): Promise<unknown[]> {
-		return listTier2IncidentsForRun(runId, limit);
+		return this.repository.listIncidentsForRun(runId, limit);
 	}
 
 	async getIncident(incidentId: string): Promise<unknown> {
-		const incident = await getTier2IncidentById(incidentId);
+		const incident = await this.repository.getIncidentById(incidentId);
 		if (!incident) {
 			return null;
 		}
-		const decisions = await listTier2Decisions(incidentId, 50);
+		const decisions = await this.repository.listDecisions(incidentId, 50);
 		return {
 			incident,
 			decisions,

@@ -8,12 +8,19 @@ export interface CompiledPolicyArtifact {
 }
 
 export class PolicyCompilerService {
-	private parseEntityHash(entityKey: string): string[] {
+	private parseEntityHash(entityKey: string): number[] {
 		if (!entityKey.startsWith("hash:")) {
 			return [];
 		}
-		const hash = entityKey.slice("hash:".length).trim();
-		return hash.length > 0 ? [hash] : [];
+		const hashRaw = entityKey.slice("hash:".length).trim();
+		if (hashRaw.length === 0) {
+			return [];
+		}
+		const parsed = Number(hashRaw);
+		if (!Number.isSafeInteger(parsed) || parsed < 0) {
+			return [];
+		}
+		return [parsed];
 	}
 
 	private ruleFromIncident(incident: Tier2Incident): Tier1PolicyRule | null {
@@ -83,4 +90,3 @@ export class PolicyCompilerService {
 		};
 	}
 }
-

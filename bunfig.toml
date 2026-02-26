@@ -3,6 +3,7 @@ cache = true
 
 [test]
 coverage = true
+root = "./tests"
 
 [build]
 minify = true
