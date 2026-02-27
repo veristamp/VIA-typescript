@@ -225,6 +225,8 @@ pub struct InternalFeedback {
 pub struct ApiFeedbackRequest {
     pub entity_id: Option<String>,
     pub entity_hash: Option<u64>,
+    #[serde(default)]
+    pub entity_hash_text: Option<String>,
     pub signal_timestamp: u64,
     pub was_true_positive: bool,
     pub detector_scores: Vec<f32>,
@@ -637,6 +639,11 @@ async fn feedback_handler(
     // Resolve hash
     let hash = if let Some(h) = feedback.entity_hash {
         h
+    } else if let Some(ref h) = feedback.entity_hash_text {
+        match h.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => return StatusCode::BAD_REQUEST,
+        }
     } else if let Some(ref id) = feedback.entity_id {
         xxhash_rust::xxh3::xxh3_64(id.as_bytes())
     } else {

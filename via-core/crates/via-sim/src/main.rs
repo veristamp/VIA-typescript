@@ -40,6 +40,10 @@ enum Commands {
         /// Tick interval in milliseconds
         #[arg(long, default_value = "100")]
         tick_ms: u64,
+
+        /// Deterministic simulation seed
+        #[arg(long, default_value = "42")]
+        seed: u64,
     },
 
     /// List available scenarios
@@ -85,8 +89,9 @@ fn main() {
             anomalies,
             format,
             tick_ms,
+            seed,
         } => {
-            run_generate(duration, scenario, anomalies, format, tick_ms);
+            run_generate(duration, scenario, anomalies, format, tick_ms, seed);
         }
         Commands::List => {
             run_list();
@@ -109,6 +114,7 @@ fn run_generate(
     anomalies: Option<String>,
     format: OutputFormat,
     tick_ms: u64,
+    seed: u64,
 ) {
     eprintln!("╔══════════════════════════════════════════════════════════════╗");
     eprintln!("║           VIA-SIM Log Generation                             ║");
@@ -119,12 +125,13 @@ fn run_generate(
         "║ Anomalies: {:49} ║",
         anomalies.as_deref().unwrap_or("none")
     );
+    eprintln!("║ Seed: {:54} ║", seed);
     eprintln!("╚══════════════════════════════════════════════════════════════╝");
 
     let duration_ns = parse_duration(&duration) * 1_000_000_000;
     let tick_ns = tick_ms * 1_000_000;
 
-    let mut engine = SimulationEngine::new();
+    let mut engine = SimulationEngine::new_deterministic(seed);
     engine.start(&scenario);
 
     // Schedule anomalies if provided
@@ -259,7 +266,7 @@ fn run_benchmark(duration: String, target_eps: u64) {
 
     let duration_sec = parse_duration(&duration);
 
-    let mut engine = SimulationEngine::new();
+    let mut engine = SimulationEngine::new_deterministic(42);
     engine.start("normal_traffic");
 
     // Add multiple scenarios for higher throughput

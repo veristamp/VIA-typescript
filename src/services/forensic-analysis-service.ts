@@ -248,6 +248,13 @@ export class ForensicAnalysisService {
 
 		const candidates: IncidentCandidate[] = [];
 		for (const [incidentId, value] of acc.entries()) {
+			const memberCount = value.memberPointIds.size;
+			if (value.reason === "temporal" && memberCount < 3) {
+				continue;
+			}
+			if ((value.reason === "semantic" || value.reason === "trace") && memberCount < 2) {
+				continue;
+			}
 			candidates.push({
 				incidentId,
 				memberPointIds: Array.from(value.memberPointIds),
@@ -293,8 +300,15 @@ export class ForensicAnalysisService {
 		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
 		const clusterCandidates = this.buildCandidatesFromHits(clusters);
 
-		// Seed single-event candidates so new events always show up in workflow.
-		const seededCandidates: IncidentCandidate[] = seedEvents.map((event) => ({
+		// Seed only high-signal single-event candidates to avoid flooding Tier-2 with low-value incidents.
+		const seededCandidates: IncidentCandidate[] = seedEvents
+			.filter(
+				(event) =>
+					event.confidence >= 0.9 ||
+					event.severity >= 0.85 ||
+					event.score >= 0.95,
+			)
+			.map((event) => ({
 			incidentId:
 				typeof event.attributes.ground_truth_anomaly_id === "string" &&
 				event.attributes.ground_truth_anomaly_id.length > 0
@@ -320,7 +334,7 @@ export class ForensicAnalysisService {
 						? event.attributes.benchmark_run_id
 						: null,
 			},
-		}));
+			}));
 
 		return [...clusterCandidates, ...seededCandidates];
 	}

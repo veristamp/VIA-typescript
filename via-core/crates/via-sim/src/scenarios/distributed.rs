@@ -7,10 +7,9 @@
 //! - Business logic abuse
 
 use crate::core::{AnyValue, KeyValue, LogRecord};
-use crate::scenarios::Scenario;
 use crate::scenarios::traffic::create_log;
+use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_init, rng_for_tick};
 use rand::prelude::*;
-use uuid::Uuid;
 
 // ============================================================================
 // DDoS Attack Scenario
@@ -26,7 +25,7 @@ pub struct DDoSAttack {
 
 impl DDoSAttack {
     pub fn new(target_service: &str, source_ips: usize, requests_per_ip: f64) -> Self {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_init("distributed/ddos");
         let ips: Vec<String> = (0..source_ips)
             .map(|_| {
                 format!(
@@ -54,14 +53,13 @@ impl Scenario for DDoSAttack {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/ddos", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.requests_per_ip * self.source_ip_count as f64 * seconds).round() as u64;
         let mut logs = Vec::new();
 
         for i in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             let source_ip = self.source_ips.choose(&mut rng).unwrap();
 
             // Rate limiting kicks in
@@ -139,7 +137,7 @@ impl Scenario for CascadeFailure {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/cascade_failure", current_time_ns, delta_ns);
         let mut logs = Vec::new();
 
         // Increment cascade depth over time
@@ -158,8 +156,7 @@ impl Scenario for CascadeFailure {
             let service = &self.affected_services[i];
 
             if rng.random_bool(self.failure_rate) {
-                let trace_id = Uuid::new_v4().simple().to_string();
-                let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+                let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
                 let (level, error_type) = if i == 0 {
                     ("FATAL", "RootCauseError")
@@ -229,7 +226,7 @@ impl Scenario for DataExfiltration {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/data_exfiltration", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let data_mb = self.exfil_rate_mb_per_sec * seconds;
         self.total_exfiltrated_mb += data_mb;
@@ -237,8 +234,7 @@ impl Scenario for DataExfiltration {
         let mut logs = Vec::new();
 
         if rng.random_bool(0.3) {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             // Suspicious external IP
             let external_ip = format!(
@@ -316,7 +312,7 @@ impl Scenario for SlowQueries {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/slow_queries", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.query_rate * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -328,8 +324,7 @@ impl Scenario for SlowQueries {
         ];
 
         for _ in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             let base_latency = rng.random_range(50.0..200.0);
             let slow_latency = base_latency * self.latency_multiplier;
@@ -397,7 +392,7 @@ impl Scenario for ErrorRateSpike {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/error_rate_spike", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.request_rate * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -411,8 +406,7 @@ impl Scenario for ErrorRateSpike {
         ];
 
         for _ in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             let is_error = rng.random_bool(self.error_rate);
 
@@ -471,14 +465,13 @@ impl Scenario for TrafficSpike {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("distributed/traffic_spike", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.base_rps * self.multiplier * seconds).round() as u64;
         let mut logs = Vec::new();
 
         for i in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             // High latency due to load
             let latency = rng.random_range(100.0..500.0) * (1.0 + self.multiplier / 10.0);

@@ -22,10 +22,16 @@ pub struct BenchmarkConfig {
     pub base_scenario: String,
     pub duration_minutes: u64,
     pub tick_ms: u64,
+    #[serde(default = "default_simulation_seed")]
+    pub simulation_seed: u64,
     pub anomalies: Vec<AnomalySpec>,
     /// Batch size for batch processing mode (0 = single event mode)
     #[serde(default)]
     pub batch_size: usize,
+}
+
+fn default_simulation_seed() -> u64 {
+    42
 }
 
 impl Default for BenchmarkConfig {
@@ -35,6 +41,7 @@ impl Default for BenchmarkConfig {
             base_scenario: "normal_traffic".to_string(),
             duration_minutes: 5,
             tick_ms: 100,
+            simulation_seed: default_simulation_seed(),
             anomalies: Vec::new(),
             batch_size: 0, // Single event mode by default
         }
@@ -150,7 +157,7 @@ impl BenchmarkRunner {
         let start_time = Instant::now();
 
         // Create simulation engine
-        let mut engine = SimulationEngine::new();
+        let mut engine = SimulationEngine::new_deterministic(config.simulation_seed);
         engine.start(&config.base_scenario);
 
         // Schedule all anomalies

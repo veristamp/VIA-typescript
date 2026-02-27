@@ -1,8 +1,7 @@
 use crate::core::{AnyValue, KeyValue, LogRecord};
-use crate::scenarios::Scenario;
+use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
 use rand_distr::{Distribution, LogNormal, Normal};
-use uuid::Uuid;
 
 // Shared helper for creating logs to reduce duplication
 pub fn create_log(
@@ -68,7 +67,7 @@ impl Scenario for NormalTraffic {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("traffic/normal", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
 
         // Add some jitter to the volume (Poisson-like)
@@ -79,8 +78,7 @@ impl Scenario for NormalTraffic {
 
         for _ in 0..count {
             let service = self.services.choose(&mut rng).unwrap();
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             // LogNormal for realistic latency tail
             let latency_dist = LogNormal::new(4.0, 0.5).unwrap(); // ~55ms mean, but with tail

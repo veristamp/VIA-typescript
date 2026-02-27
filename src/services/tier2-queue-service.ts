@@ -132,8 +132,11 @@ export class Tier2QueueService {
 		return maxSeverity >= 0.85 ? "critical" : "normal";
 	}
 
-	private pickRunnableTasks(now: number): QueueTask[] {
+	private pickRunnableTasks(now: number, maxTasks: number): QueueTask[] {
 		if (this.queue.length === 0) {
+			return [];
+		}
+		if (maxTasks <= 0) {
 			return [];
 		}
 
@@ -157,8 +160,8 @@ export class Tier2QueueService {
 			return a.enqueuedAt - b.enqueuedAt;
 		});
 
-		const selected = runnable.slice(0, this.batchSize);
-		const deferred = runnable.slice(this.batchSize);
+		const selected = runnable.slice(0, maxTasks);
+		const deferred = runnable.slice(maxTasks);
 		this.queue = [...kept, ...deferred];
 		return selected;
 	}
@@ -170,7 +173,8 @@ export class Tier2QueueService {
 
 		const now = Math.floor(Date.now() / 1000);
 		const capacity = this.maxWorkers - this.inFlight;
-		const tasks = this.pickRunnableTasks(now).slice(0, capacity);
+		const maxTasks = Math.min(this.batchSize, capacity);
+		const tasks = this.pickRunnableTasks(now, maxTasks);
 		if (tasks.length === 0) {
 			return;
 		}

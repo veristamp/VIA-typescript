@@ -13,6 +13,7 @@ pub struct PipelineBenchmarkConfig {
     pub tier2_base_url: String,
     pub send_batch_size: usize,
     pub drain_timeout_secs: u64,
+    pub simulation_seed: u64,
 }
 
 impl Default for PipelineBenchmarkConfig {
@@ -22,6 +23,7 @@ impl Default for PipelineBenchmarkConfig {
             tier2_base_url: "http://127.0.0.1:3000".to_string(),
             send_batch_size: 256,
             drain_timeout_secs: 900,
+            simulation_seed: 42,
         }
     }
 }
@@ -30,6 +32,7 @@ impl Default for PipelineBenchmarkConfig {
 pub struct PipelineBenchmarkResults {
     pub run_id: String,
     pub config_name: String,
+    pub simulation_manifest: SimulationRunManifest,
     pub total_events: u64,
     pub total_ground_truth_anomaly_events: u64,
     pub total_detected_anomalies: u64,
@@ -51,6 +54,23 @@ pub struct PipelineBenchmarkResults {
     pub throughput_eps: f64,
     pub cost_per_10k_events_seconds: f64,
     pub anomaly_breakdown: Vec<AnomalyDetectionBreakdown>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SimulationRunManifest {
+    pub simulation_seed: u64,
+    pub base_scenario: String,
+    pub duration_minutes: u64,
+    pub tick_ms: u64,
+    pub anomalies: Vec<AnomalyManifestItem>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AnomalyManifestItem {
+    pub anomaly_id: String,
+    pub scenario: String,
+    pub start_time_sec: u64,
+    pub duration_sec: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -94,6 +114,13 @@ struct AnomalyEventStats {
     detected_events: u64,
 }
 
+#[derive(Clone, Debug)]
+struct ScheduledAnomalyWindow {
+    anomaly_id: String,
+    start_time_ns: u64,
+    end_time_ns: u64,
+}
+
 pub struct PipelineBenchmarkRunner {
     profile: AnomalyProfile,
     client: Client,
@@ -119,23 +146,33 @@ impl PipelineBenchmarkRunner {
 
         let url = format!("{}/tier2/anomalies", base_url.trim_end_matches('/'));
         let body = json!({ "signals": signals });
-
-        let response = self
-            .client
-            .post(url)
-            .json(&body)
-            .send()
-            .map_err(|e| format!("tier2 ingest request failed: {e}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .unwrap_or_else(|_| "<body-unavailable>".to_string());
-            return Err(format!("tier2 ingest failed with status {status}: {text}"));
+        let mut last_error: Option<String> = None;
+        for attempt in 0..=3 {
+            let response = self.client.post(&url).json(&body).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp
+                        .text()
+                        .unwrap_or_else(|_| "<body-unavailable>".to_string());
+                    // Retry only on server-side failures.
+                    if status.is_server_error() && attempt < 3 {
+                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
+                        continue;
+                    }
+                    return Err(format!("tier2 ingest failed with status {status}: {text}"));
+                }
+                Err(e) => {
+                    last_error = Some(format!("tier2 ingest request failed: {e}"));
+                    if attempt < 3 {
+                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
+                        continue;
+                    }
+                }
+            }
         }
-
-        Ok(())
+        Err(last_error.unwrap_or_else(|| "tier2 ingest request failed".to_string()))
     }
 
     fn wait_for_pipeline_drain(&self, base_url: &str, timeout_secs: u64) -> Result<(), String> {
@@ -213,18 +250,22 @@ impl PipelineBenchmarkRunner {
     fn process_log(
         &mut self,
         run_id: &str,
+        tier2_origin_ns: u64,
         log: &LogRecord,
+        windows: &[ScheduledAnomalyWindow],
         detected_anomaly_signals: &mut Vec<Tier2Signal>,
         latencies_micros: &mut Vec<u64>,
         counts: &mut DetectionCounts,
-        gt_ids_from_logs: &mut HashSet<String>,
+        gt_ids_seen_in_events: &mut HashSet<String>,
         anomaly_stats: &mut HashMap<String, AnomalyEventStats>,
+        gt_diag: &mut GroundTruthResolutionDiag,
     ) {
         let start = Instant::now();
 
         let value = log.metric_value();
         let timestamp: u64 = log.timeUnixNano.parse().unwrap_or(0);
         let entity_hash = xxhash_rust::xxh3::xxh3_64(log.traceId.as_bytes());
+        let ground_truth_id = resolve_ground_truth_id(log, timestamp, windows);
 
         let signal = self
             .profile
@@ -234,8 +275,10 @@ impl PipelineBenchmarkRunner {
 
         if log.isGroundTruthAnomaly {
             counts.gt_events += 1;
-            if let Some(id) = &log.anomalyId {
-                gt_ids_from_logs.insert(id.clone());
+            gt_diag.gt_logs += 1;
+            if let Some(id) = ground_truth_id.as_ref() {
+                gt_diag.gt_logs_with_id += 1;
+                gt_ids_seen_in_events.insert(id.clone());
                 let stats = anomaly_stats.entry(id.clone()).or_default();
                 stats.ground_truth_events += 1;
                 if signal.is_anomaly {
@@ -255,22 +298,24 @@ impl PipelineBenchmarkRunner {
             return;
         }
 
-        let event_id = format!(
-            "{}:{}:{}",
-            signal.timestamp, signal.entity_hash, signal.sequence
-        );
+        let event_id = format!("{}:{}:{}", log.timeUnixNano, log.traceId, log.spanId);
+        let tier2_timestamp_ns = tier2_origin_ns.saturating_add(timestamp);
 
         let mut attributes = HashMap::new();
         attributes.insert("benchmark_run_id".to_string(), run_id.to_string());
-        if let Some(id) = &log.anomalyId {
+        if let Some(id) = ground_truth_id {
             attributes.insert("ground_truth_anomaly_id".to_string(), id.clone());
+            gt_ids_seen_in_events.insert(id);
+            if log.isGroundTruthAnomaly {
+                gt_diag.detected_gt_events_with_id += 1;
+            }
         }
 
         detected_anomaly_signals.push(Tier2Signal {
             event_id,
             schema_version: 1,
             entity_hash: signal.entity_hash.to_string(),
-            timestamp: signal.timestamp.to_string(),
+            timestamp: tier2_timestamp_ns.to_string(),
             score: signal.ensemble_score,
             severity: signal.severity as u8,
             primary_detector: signal.attribution.primary_detector,
@@ -321,32 +366,65 @@ impl PipelineBenchmarkRunner {
             .collect()
     }
 
+    fn build_simulation_manifest(
+        cfg: &PipelineBenchmarkConfig,
+        manifests: &[ScheduledAnomalyManifest],
+    ) -> SimulationRunManifest {
+        SimulationRunManifest {
+            simulation_seed: cfg.simulation_seed,
+            base_scenario: cfg.benchmark.base_scenario.clone(),
+            duration_minutes: cfg.benchmark.duration_minutes,
+            tick_ms: cfg.benchmark.tick_ms,
+            anomalies: manifests
+                .iter()
+                .map(|m| AnomalyManifestItem {
+                    anomaly_id: m.anomaly_id.clone(),
+                    scenario: m.scenario.clone(),
+                    start_time_sec: m.start_time_sec,
+                    duration_sec: m.duration_sec,
+                })
+                .collect(),
+        }
+    }
+
     pub fn run(
         &mut self,
         cfg: PipelineBenchmarkConfig,
     ) -> Result<PipelineBenchmarkResults, String> {
         let run_id = format!("pipeline_{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
 
-        let mut engine = SimulationEngine::new();
+        let mut engine = SimulationEngine::new_deterministic(cfg.simulation_seed);
         engine.start(&cfg.benchmark.base_scenario);
 
         let mut anomaly_manifest: Vec<ScheduledAnomalyManifest> = Vec::new();
+        let mut anomaly_windows: Vec<ScheduledAnomalyWindow> = Vec::new();
         for anomaly in &cfg.benchmark.anomalies {
             let start_offset_ns = anomaly.start_time_sec * 1_000_000_000;
             let duration_ns = anomaly.duration_sec * 1_000_000_000;
             if let Some(anomaly_id) =
                 engine.schedule_anomaly(&anomaly.scenario, start_offset_ns, duration_ns)
             {
+                let start_time_ns = start_offset_ns;
+                let end_time_ns = start_offset_ns + duration_ns;
                 anomaly_manifest.push(ScheduledAnomalyManifest {
-                    anomaly_id,
+                    anomaly_id: anomaly_id.clone(),
                     scenario: anomaly.scenario.clone(),
                     start_time_sec: anomaly.start_time_sec,
                     duration_sec: anomaly.duration_sec,
+                });
+                anomaly_windows.push(ScheduledAnomalyWindow {
+                    anomaly_id,
+                    start_time_ns,
+                    end_time_ns,
                 });
             }
         }
 
         let start = Instant::now();
+        let tier2_origin_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
 
         let duration_ns = cfg.benchmark.duration_minutes * 60 * 1_000_000_000;
         let tick_ns = cfg.benchmark.tick_ms * 1_000_000;
@@ -355,8 +433,13 @@ impl PipelineBenchmarkRunner {
         let mut counts = DetectionCounts::default();
         let mut latencies_micros: Vec<u64> = Vec::new();
         let mut pending_signals: Vec<Tier2Signal> = Vec::with_capacity(cfg.send_batch_size);
-        let mut gt_ids_from_logs: HashSet<String> = HashSet::new();
+        let gt_ids_expected: HashSet<String> = anomaly_manifest
+            .iter()
+            .map(|item| item.anomaly_id.clone())
+            .collect();
+        let mut gt_ids_seen_in_events: HashSet<String> = HashSet::new();
         let mut anomaly_stats: HashMap<String, AnomalyEventStats> = HashMap::new();
+        let mut gt_diag = GroundTruthResolutionDiag::default();
 
         for _ in 0..total_ticks {
             let batch = engine.tick(tick_ns);
@@ -367,12 +450,15 @@ impl PipelineBenchmarkRunner {
                         counts.total_events += 1;
                         self.process_log(
                             &run_id,
+                            tier2_origin_ns,
                             log,
+                            &anomaly_windows,
                             &mut pending_signals,
                             &mut latencies_micros,
                             &mut counts,
-                            &mut gt_ids_from_logs,
+                            &mut gt_ids_seen_in_events,
                             &mut anomaly_stats,
+                            &mut gt_diag,
                         );
 
                         if pending_signals.len() >= cfg.send_batch_size {
@@ -395,7 +481,15 @@ impl PipelineBenchmarkRunner {
         self.wait_for_pipeline_drain(&cfg.tier2_base_url, adaptive_timeout_secs)?;
 
         let incidents = self.fetch_incidents(&cfg.tier2_base_url, &run_id)?;
-        let incident_metrics = compute_incident_metrics(&incidents, &run_id, &gt_ids_from_logs);
+        let incident_metrics = compute_incident_metrics(&incidents, &run_id, &gt_ids_expected);
+        eprintln!(
+            "ground_truth_id_resolution: gt_logs={} gt_logs_with_id={} detected_gt_events_with_id={} expected_gt_ids={} seen_gt_ids_in_events={}",
+            gt_diag.gt_logs,
+            gt_diag.gt_logs_with_id,
+            gt_diag.detected_gt_events_with_id,
+            gt_ids_expected.len(),
+            gt_ids_seen_in_events.len()
+        );
 
         let elapsed = start.elapsed().as_secs_f64();
         let throughput_eps = if elapsed > 0.0 {
@@ -406,12 +500,13 @@ impl PipelineBenchmarkRunner {
 
         let (detection_precision, detection_recall, detection_f1) =
             calculate_metrics(counts.tp, counts.fp, counts.fn_);
-        let anomaly_breakdown =
-            Self::build_anomaly_breakdown(&anomaly_manifest, &anomaly_stats);
+        let anomaly_breakdown = Self::build_anomaly_breakdown(&anomaly_manifest, &anomaly_stats);
+        let simulation_manifest = Self::build_simulation_manifest(&cfg, &anomaly_manifest);
 
         Ok(PipelineBenchmarkResults {
             run_id,
             config_name: cfg.benchmark.name,
+            simulation_manifest,
             total_events: counts.total_events,
             total_ground_truth_anomaly_events: counts.gt_events,
             total_detected_anomalies: counts.tp + counts.fp,
@@ -438,6 +533,25 @@ impl PipelineBenchmarkRunner {
     }
 }
 
+fn resolve_ground_truth_id(
+    log: &LogRecord,
+    timestamp_ns: u64,
+    windows: &[ScheduledAnomalyWindow],
+) -> Option<String> {
+    if let Some(id) = log.anomalyId.as_ref().filter(|id| !id.is_empty()) {
+        return Some(id.clone());
+    }
+
+    if !log.isGroundTruthAnomaly {
+        return None;
+    }
+
+    windows
+        .iter()
+        .find(|window| timestamp_ns >= window.start_time_ns && timestamp_ns <= window.end_time_ns)
+        .map(|window| window.anomaly_id.clone())
+}
+
 #[derive(Default)]
 struct DetectionCounts {
     total_events: u64,
@@ -457,6 +571,13 @@ struct IncidentMetrics {
     merge_error_rate: f64,
     split_error_rate: f64,
     escalation_quality: f64,
+}
+
+#[derive(Default)]
+struct GroundTruthResolutionDiag {
+    gt_logs: u64,
+    gt_logs_with_id: u64,
+    detected_gt_events_with_id: u64,
 }
 
 fn compute_incident_metrics(
@@ -579,6 +700,7 @@ pub fn scenario_by_name(name: &str) -> BenchmarkConfig {
             base_scenario: "normal_traffic".to_string(),
             duration_minutes: 2,
             tick_ms: 50,
+            simulation_seed: 42,
             anomalies: Vec::<AnomalySpec>::new(),
             batch_size: 0,
         },

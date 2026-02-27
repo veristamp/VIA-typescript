@@ -332,7 +332,10 @@ export async function listTier2IncidentsForRun(
 	limit: number,
 ): Promise<Tier2Incident[]> {
 	return db.query.tier2Incidents.findMany({
-		where: sql`${schema.tier2Incidents.evidence} ->> 'benchmark_run_id' = ${benchmarkRunId}`,
+		where: sql`(
+			${schema.tier2Incidents.evidence} ->> 'benchmark_run_id' = ${benchmarkRunId}
+			OR (${schema.tier2Incidents.evidence} -> 'benchmark_run_ids') ? ${benchmarkRunId}
+		)`,
 		orderBy: [desc(schema.tier2Incidents.lastSeenTs)],
 		limit,
 	});

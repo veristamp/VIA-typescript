@@ -1,8 +1,7 @@
 use crate::core::{AnyValue, KeyValue, LogRecord};
-use crate::scenarios::Scenario;
 use crate::scenarios::traffic::create_log;
+use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
-use uuid::Uuid;
 
 // --- 1. Credential Stuffing / Brute Force ---
 pub struct CredentialStuffing {
@@ -15,7 +14,7 @@ impl Scenario for CredentialStuffing {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("security/credential_stuffing", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.attack_rps * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -23,8 +22,7 @@ impl Scenario for CredentialStuffing {
         // 80% fail, 20% success (simulating successful breaches mixed in)
         // High cardinality user IDs
         for i in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             let user_id = format!("user_{}_{}", current_time_ns, i); // Synthetic distinct users
             let is_success = rng.random_bool(0.01); // 1% accidental success in stuffing
 
@@ -98,7 +96,7 @@ impl Scenario for SqlInjection {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("security/sql_injection", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.attack_rps * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -111,8 +109,7 @@ impl Scenario for SqlInjection {
         ];
 
         for _ in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             let payload = payloads.choose(&mut rng).unwrap();
 
             // WAF or App log
@@ -154,7 +151,7 @@ impl Scenario for PortScan {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("security/port_scan", current_time_ns, delta_ns);
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         let count = (self.scan_speed * seconds).round() as u64;
         let mut logs = Vec::new();
@@ -162,8 +159,7 @@ impl Scenario for PortScan {
         let ports = vec![21, 22, 23, 80, 443, 3306, 8080, 5432];
 
         for _ in 0..count {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             let port = ports.choose(&mut rng).unwrap();
 
             logs.push(create_log(

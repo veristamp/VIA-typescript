@@ -6,6 +6,7 @@ import type {
 	CompiledPolicyArtifact,
 	PolicyCompilerService,
 } from "./policy-compiler-service";
+import { Tier1SyncService } from "./tier1-sync-service";
 
 export interface SuppressRequest {
 	rhythmHash: string;
@@ -27,6 +28,7 @@ export class ControlService {
 	constructor(
 		private readonly policyCompiler?: PolicyCompilerService,
 		private readonly repository: Tier2ControlRepository = tier2ControlRepository,
+		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {
 		// Tables are initialized during application bootstrap, so defer DB reads.
 	}
@@ -139,6 +141,17 @@ export class ControlService {
 			throw new Error(`policy not found: ${policyVersion}`);
 		}
 		await this.repository.activateTier1Policy(policyVersion);
+		try {
+			await this.tier1Sync.pushPolicySnapshot(
+				policy.compiledJson as Tier1PolicySnapshot,
+			);
+		} catch (error) {
+			logger.error("Failed pushing policy snapshot to Tier1", {
+				policyVersion,
+				error: String(error),
+			});
+			throw error;
+		}
 		logger.info("Published Tier-1 policy", { policyVersion });
 	}
 

@@ -3,6 +3,7 @@ import { resolveIncidentDecision } from "../modules/tier2/domain/incident-decisi
 import type { Tier2IncidentRepository } from "../modules/tier2/ports/repositories";
 import type { IncidentCandidate, IncidentStatus } from "../types";
 import { logger } from "../utils/logger";
+import { Tier1SyncService, type Tier1FeedbackEvent } from "./tier1-sync-service";
 
 export interface IncidentDecision {
 	incidentId: string;
@@ -17,7 +18,66 @@ const POLICY_VERSION = "tier2-policy-v1";
 export class IncidentService {
 	constructor(
 		private readonly repository: Tier2IncidentRepository = tier2IncidentRepository,
+		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {}
+
+	private parseEntityHashText(candidate: IncidentCandidate): string | undefined {
+		const direct = candidate.entityKey.startsWith("hash:")
+			? candidate.entityKey.slice("hash:".length)
+			: "";
+		if (/^\d+$/.test(direct)) {
+			return direct;
+		}
+		const fromEvidence = candidate.evidence.entity_hash;
+		if (typeof fromEvidence === "string" && /^\d+$/.test(fromEvidence)) {
+			return fromEvidence;
+		}
+		return undefined;
+	}
+
+	private buildFeedbackEvent(
+		candidate: IncidentCandidate,
+		decision: IncidentDecision,
+	): Tier1FeedbackEvent | null {
+		let wasTruePositive: boolean;
+		let labelClass: "true_positive" | "false_positive";
+		if (decision.status === "suppressed") {
+			wasTruePositive = false;
+			labelClass = "false_positive";
+		} else if (
+			decision.status === "escalated" ||
+			decision.status === "merged"
+		) {
+			wasTruePositive = true;
+			labelClass = "true_positive";
+		} else {
+			return null;
+		}
+
+		const detectorScoresRaw = candidate.evidence.detector_scores;
+		const detectorScores = Array.isArray(detectorScoresRaw)
+			? detectorScoresRaw
+					.map((value) => Number(value))
+					.filter((value) => Number.isFinite(value))
+			: [];
+		const latencyMs = Math.max(
+			0,
+			Math.floor(Date.now() - candidate.lastSeenTs * 1000),
+		);
+
+		return {
+			entity_hash_text: this.parseEntityHashText(candidate),
+			entity_id: candidate.entityKey,
+			signal_timestamp: candidate.lastSeenTs,
+			was_true_positive: wasTruePositive,
+			detector_scores: detectorScores,
+			source: "tier2_auto",
+			confidence: decision.confidence,
+			label_class: labelClass,
+			pattern_id: candidate.incidentId,
+			feedback_latency_ms: latencyMs,
+		};
+	}
 
 	private resolveDecision(candidate: IncidentCandidate): IncidentDecision {
 		const resolved = resolveIncidentDecision(candidate);
@@ -35,6 +95,7 @@ export class IncidentService {
 		candidates: IncidentCandidate[],
 	): Promise<IncidentDecision[]> {
 		const decisions: IncidentDecision[] = [];
+		const feedbackEvents: Tier1FeedbackEvent[] = [];
 
 		for (const candidate of candidates) {
 			const decision = this.resolveDecision(candidate);
@@ -63,6 +124,14 @@ export class IncidentService {
 				decision.policyVersion,
 			);
 			decisions.push(decision);
+			const feedbackEvent = this.buildFeedbackEvent(candidate, decision);
+			if (feedbackEvent) {
+				feedbackEvents.push(feedbackEvent);
+			}
+		}
+
+		if (feedbackEvents.length > 0) {
+			await this.tier1Sync.sendFeedback(feedbackEvents);
 		}
 
 		if (decisions.length > 0) {

@@ -29,6 +29,21 @@ use crate::core::{
 use crate::scenarios::{self, Scenario};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy)]
+pub struct DeterminismConfig {
+    pub enabled: bool,
+    pub seed: u64,
+}
+
+impl Default for DeterminismConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            seed: 0,
+        }
+    }
+}
+
 /// Unified simulation engine
 pub struct SimulationEngine {
     /// Active scenarios generating logs
@@ -54,6 +69,8 @@ pub struct SimulationEngine {
 
     /// Statistics
     stats: EngineStats,
+    /// Determinism controls (for reproducible benchmark runs)
+    determinism: DeterminismConfig,
 }
 
 /// Scheduled scenario for future activation
@@ -155,12 +172,28 @@ impl SimulationEngine {
             ground_truth: GroundTruthTracker::new(),
             state: EngineState::Stopped,
             stats: EngineStats::default(),
+            determinism: DeterminismConfig::default(),
         }
+    }
+
+    /// Create a deterministic simulation engine for reproducible benchmarking.
+    pub fn new_deterministic(seed: u64) -> Self {
+        let mut engine = Self::new();
+        engine.determinism = DeterminismConfig {
+            enabled: true,
+            seed,
+        };
+        engine
+    }
+
+    pub fn set_determinism(&mut self, config: DeterminismConfig) {
+        self.determinism = config;
     }
 
     /// Start the simulation with a baseline scenario
     pub fn start(&mut self, baseline_scenario: &str) {
         self.reset();
+        scenarios::configure_determinism(self.determinism.enabled, self.determinism.seed);
 
         // Set baseline scenario
         if let Some(scenario) = scenarios::create_scenario(baseline_scenario) {
@@ -170,10 +203,14 @@ impl SimulationEngine {
             self.baseline = scenarios::create_scenario("normal_traffic");
         }
 
-        self.start_time_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        self.start_time_ns = if self.determinism.enabled {
+            0
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+        };
         self.current_time_ns = self.start_time_ns;
         self.state = EngineState::Running;
     }
@@ -184,6 +221,7 @@ impl SimulationEngine {
         self.baseline = None;
         self.scenarios.clear();
         self.scheduled.clear();
+        scenarios::reset_determinism();
     }
 
     /// Pause the simulation
@@ -473,5 +511,43 @@ mod tests {
             batch.metadata.anomaly_log_count > 0,
             "Should have generated anomaly logs"
         );
+    }
+
+    #[test]
+    fn test_deterministic_replay_same_seed() {
+        let mut e1 = SimulationEngine::new_deterministic(42);
+        e1.start("normal_traffic");
+        e1.schedule_anomaly("credential_stuffing", 0, 1_000_000_000);
+
+        let mut e2 = SimulationEngine::new_deterministic(42);
+        e2.start("normal_traffic");
+        e2.schedule_anomaly("credential_stuffing", 0, 1_000_000_000);
+
+        let mut h1 = Vec::new();
+        let mut h2 = Vec::new();
+        for _ in 0..5 {
+            let b1 = e1.tick(200_000_000);
+            let b2 = e2.tick(200_000_000);
+
+            h1.push(serde_json::to_string(&b1.logs).unwrap());
+            h2.push(serde_json::to_string(&b2.logs).unwrap());
+        }
+
+        assert_eq!(h1, h2, "same seed should replay same log stream");
+    }
+
+    #[test]
+    fn test_deterministic_replay_different_seed() {
+        let mut e1 = SimulationEngine::new_deterministic(42);
+        e1.start("normal_traffic");
+        let b1 = e1.tick(1_000_000_000);
+
+        let mut e2 = SimulationEngine::new_deterministic(43);
+        e2.start("normal_traffic");
+        let b2 = e2.tick(1_000_000_000);
+
+        let s1 = serde_json::to_string(&b1.logs).unwrap();
+        let s2 = serde_json::to_string(&b2.logs).unwrap();
+        assert_ne!(s1, s2, "different seeds should alter generated log stream");
     }
 }

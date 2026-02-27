@@ -104,7 +104,7 @@ pub use core::{
     ScopeLog, SimulationBatch,
 };
 
-pub use engine::{EngineState, EngineStats, SimulationEngine};
+pub use engine::{DeterminismConfig, EngineState, EngineStats, SimulationEngine};
 
 pub use scenarios::{
     Scenario,

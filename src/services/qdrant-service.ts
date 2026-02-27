@@ -20,7 +20,7 @@ type PayloadIndexFieldSchema = Parameters<
 
 export class QdrantService {
 	private client: QdrantClient;
-	private tier2Dim: number = 384;
+	private tier2Dim: number = 64;
 	private tier2CollectionPrefix: string = "via_forensic_index_v2";
 	private embeddingBaseUrl: string;
 	private embeddingModel: string;
@@ -44,9 +44,10 @@ export class QdrantService {
 		this.embeddingModel =
 			process.env.EMBEDDING_MODEL || "text-embedding-nomic-embed-text-v1.5";
 		this.embeddingDimension = Number.parseInt(
-			process.env.EMBEDDING_DIMENSION || `${this.tier2Dim}`,
+			process.env.EMBEDDING_DIMENSION || "64",
 			10,
 		);
+		this.tier2Dim = this.embeddingDimension;
 	}
 
 	private async mapWithConcurrency<T, R>(
@@ -361,10 +362,12 @@ export class QdrantService {
 
 			await this.ensurePayloadIndex(collectionName, "start_ts", "integer");
 			await this.ensurePayloadIndex(collectionName, "timestamp", "integer");
-			await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
-			await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
-			await this.ensurePayloadIndex(collectionName, "service", "keyword");
-			await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
+				await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
+				await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
+				await this.ensurePayloadIndex(collectionName, "entity_hash", "keyword");
+				await this.ensurePayloadIndex(collectionName, "group_key", "keyword");
+				await this.ensurePayloadIndex(collectionName, "service", "keyword");
+				await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
 			await this.ensurePayloadIndex(collectionName, "body", {
 				type: "text",
 				tokenizer: "word",
@@ -406,9 +409,31 @@ export class QdrantService {
 			settings.qdrant.maxConcurrentUpserts,
 			async ([collection, collectionEvents]) => {
 				await this.ensureDailyTier2Collection(collection);
-				const denseVectors = await this.getEmbeddings(
-					collectionEvents.map((event) => event.textForEmbedding),
-				);
+				const denseVectors = new Array<number[]>(collectionEvents.length);
+				const embedIndices: number[] = [];
+				const embedTexts: string[] = [];
+				for (let i = 0; i < collectionEvents.length; i++) {
+					const payload = collectionEvents[i].payload;
+					const confidence = Number(payload.confidence ?? 0);
+					const severity = Number(payload.severity ?? 0);
+					if (confidence >= 0.9 || severity >= 0.85) {
+						embedIndices.push(i);
+						embedTexts.push(collectionEvents[i].textForEmbedding);
+					} else {
+						denseVectors[i] = this.generateFallbackVector(
+							collectionEvents[i].textForEmbedding,
+						);
+					}
+				}
+				if (embedTexts.length > 0) {
+					const embedded = await this.getEmbeddings(embedTexts);
+					for (let i = 0; i < embedIndices.length; i++) {
+						const idx = embedIndices[i];
+						denseVectors[idx] =
+							embedded[i] ??
+							this.generateFallbackVector(collectionEvents[idx].textForEmbedding);
+					}
+				}
 				const points = collectionEvents.map((event, idx) => {
 					const sparseVector = this.generateSparseVector(
 						event.textForEmbedding,
@@ -432,6 +457,67 @@ export class QdrantService {
 		);
 	}
 
+	private async refineWithContextFeedback(
+		collection: string,
+		filter: Record<string, unknown>,
+		hits: QdrantScoredPoint[],
+		limit: number,
+	): Promise<QdrantScoredPoint[]> {
+		if (hits.length < 4) {
+			return hits.slice(0, limit);
+		}
+		const positives = hits
+			.filter((hit) => {
+				const payload = (hit.payload || {}) as Record<string, unknown>;
+				return (
+					Number(payload.confidence ?? 0) >= 0.85 ||
+					Number(payload.severity ?? 0) >= 0.8 ||
+					Number(payload.score ?? hit.score ?? 0) >= 0.9
+				);
+			})
+			.map((hit) => hit.id);
+		const negatives = hits
+			.filter((hit) => {
+				const payload = (hit.payload || {}) as Record<string, unknown>;
+				return (
+					Number(payload.confidence ?? 0) <= 0.4 &&
+					Number(payload.severity ?? 0) <= 0.5 &&
+					Number(payload.score ?? hit.score ?? 0) <= 0.7
+				);
+			})
+			.map((hit) => hit.id);
+		const pairCount = Math.min(positives.length, negatives.length, 8);
+		if (pairCount < 2) {
+			return hits.slice(0, limit);
+		}
+		const context = Array.from({ length: pairCount }).map((_, i) => ({
+			positive: positives[i],
+			negative: negatives[i],
+		}));
+
+		try {
+			const queryClient = this.client as unknown as {
+				query: (collectionName: string, payload: Record<string, unknown>) => Promise<{ points?: QdrantScoredPoint[] } | QdrantScoredPoint[]>;
+			};
+			const response = await queryClient.query(collection, {
+				query: { context },
+				using: "log_dense_vector",
+				filter,
+				limit,
+				with_payload: true,
+			});
+			const points = Array.isArray(response)
+				? response
+				: ((response.points ?? []) as QdrantScoredPoint[]);
+			if (points.length > 0) {
+				return points;
+			}
+		} catch {
+			// Fallback to original hits if context query is not supported or fails.
+		}
+		return hits.slice(0, limit);
+	}
+
 	async findTier2Clusters(
 		startTs: number,
 		endTs: number,
@@ -447,54 +533,122 @@ export class QdrantService {
 			return [];
 		}
 
-		let queryVector: number[] | null = null;
-		let queryFilter: Record<string, unknown> | null = null;
-
+		const queryFilter: Record<string, unknown> = {
+			must: [
+				{
+					key: "start_ts",
+					range: { gte: startTs, lte: endTs },
+				},
+			],
+		};
 		if (textFilter) {
-			queryVector = await this.getEmbedding(textFilter);
-			queryFilter = {
-				must: [
-					{
-						key: "body",
-						match: {
-							text: textFilter,
-						},
-					},
-				],
-			};
-		} else {
-			queryVector = new Array(this.tier2Dim).fill(0);
+			(queryFilter.must as Record<string, unknown>[]).push({
+				key: "context",
+				match: { text: textFilter },
+			});
 		}
 
-		const namedVector = {
-			name: "log_dense_vector",
-			vector: queryVector,
-		};
-
-		const searchPromises = collections.map((collection) =>
-			this.client.search(collection, {
-				vector: namedVector,
-				filter: queryFilter,
-				limit: 100,
-				with_payload: true,
-			}),
-		);
-
 		try {
-			const results = await Promise.all(
-				searchPromises.map((promise) => promise.catch(() => [])),
+			const groupedResults = await Promise.all(
+				collections.map(async (collection) => {
+					try {
+						if (textFilter) {
+							const vector = await this.getEmbedding(textFilter);
+							return await this.client.queryGroups(collection, {
+								query: vector,
+								using: "log_dense_vector",
+								filter: queryFilter,
+								group_by: "group_key",
+								group_size: 3,
+								limit: 100,
+								with_payload: true,
+								score_threshold: 0.15,
+							});
+						}
+						return await this.client.queryGroups(collection, {
+							filter: queryFilter,
+							group_by: "group_key",
+							group_size: 3,
+							limit: 100,
+							with_payload: true,
+						});
+					} catch {
+						return { groups: [] };
+					}
+				}),
 			);
-			const allHits = results.flatMap((r) => r || []);
 
 			const grouped = new Map<string, QdrantScoredPoint>();
-			for (const hit of allHits) {
-				const rhythmHash = hit.payload?.rhythm_hash as string | undefined;
-				if (rhythmHash && !grouped.has(rhythmHash)) {
-					grouped.set(rhythmHash, hit as QdrantScoredPoint);
+			for (const result of groupedResults) {
+				const groups = (result as { groups?: Array<{ id: string | number; hits?: Array<QdrantScoredPoint> }> }).groups ?? [];
+				for (const group of groups) {
+					const topHit = group.hits?.[0];
+					if (!topHit) continue;
+					const key = String(group.id);
+					if (grouped.has(key)) continue;
+					grouped.set(key, {
+						...topHit,
+						payload: {
+							...(topHit.payload ?? {}),
+							group_key: group.id,
+							count: group.hits?.length ?? 1,
+						},
+					});
 				}
 			}
 
-			return Array.from(grouped.values());
+			if (grouped.size === 0) {
+				// Fallback for clusters when grouping is unavailable.
+				const results = await Promise.all(
+					collections.map((collection) =>
+						this.client
+							.scroll(collection, {
+								filter: queryFilter,
+								limit: 200,
+								with_payload: true,
+							})
+							.catch(() => ({ points: [] as QdrantScoredPoint[] })),
+					),
+				);
+				for (const result of results) {
+					const points =
+						(result as { points?: QdrantScoredPoint[] }).points ?? [];
+					for (const point of points) {
+						const groupKey = String(
+							point.payload?.group_key ??
+							point.payload?.rhythm_hash ??
+								point.payload?.entity_hash ??
+								point.payload?.entity_id ??
+								point.id,
+						);
+						if (!grouped.has(groupKey)) {
+							grouped.set(groupKey, point);
+						}
+					}
+				}
+			}
+
+			const baseHits = Array.from(grouped.values());
+			const refinedByCollection = await Promise.all(
+				collections.map(async (collection) => {
+					const localHits = baseHits.filter((hit) => {
+						const ts = Number(hit.payload?.start_ts ?? hit.payload?.timestamp ?? 0);
+						const localCollection = this.getDailyCollectionName(
+							this.tier2CollectionPrefix,
+							Number.isFinite(ts) ? Math.floor(ts) : startTs,
+						);
+						return localCollection === collection;
+					});
+					return this.refineWithContextFeedback(
+						collection,
+						queryFilter,
+						localHits,
+						100,
+					);
+				}),
+			);
+
+			return refinedByCollection.flat().slice(0, 200);
 		} catch (error) {
 			logger.error("Error finding Tier 2 clusters", error);
 			return [];
@@ -517,21 +671,48 @@ export class QdrantService {
 			return [];
 		}
 
-		const recommendPromises = collections.map((collection) =>
-			this.client.recommend(collection, {
-				positive: positiveIds,
-				negative: negativeIds,
-				using: "log_dense_vector",
-				limit: 50,
-				with_payload: true,
-			}),
-		);
-
 		try {
-			const results = await Promise.all(
-				recommendPromises.map((promise) => promise.catch(() => [])),
+			const filter = {
+				must: [
+					{
+						key: "start_ts",
+						range: { gte: startTs, lte: endTs },
+					},
+				],
+			};
+			const groupedResults = await Promise.all(
+				collections.map(async (collection) => {
+					try {
+						return await this.client.recommendPointGroups(collection, {
+							positive: positiveIds,
+							negative: negativeIds,
+							using: "log_dense_vector",
+							filter,
+							group_by: "group_key",
+							group_size: 3,
+							limit: 50,
+							with_payload: true,
+							score_threshold: 0.1,
+						});
+					} catch {
+						const hits = await this.client
+							.recommend(collection, {
+								positive: positiveIds,
+								negative: negativeIds,
+								using: "log_dense_vector",
+								filter,
+								limit: 50,
+								with_payload: true,
+							})
+							.catch(() => []);
+						return { groups: [{ id: "fallback", hits }] };
+					}
+				}),
 			);
-			const allHits = results.flatMap((r) => r || []);
+			const allHits = groupedResults.flatMap((result) => {
+				const groups = (result as { groups?: Array<{ hits?: QdrantScoredPoint[] }> }).groups ?? [];
+				return groups.flatMap((group) => group.hits ?? []);
+			});
 
 			allHits.sort((a, b) => (b.score || 0) - (a.score || 0));
 

@@ -30,6 +30,10 @@ struct Cli {
     /// Batch size for batch processing mode (0 = single event, default)
     #[arg(short, long, global = true, default_value = "0")]
     batch: usize,
+
+    /// Deterministic simulation seed
+    #[arg(long, global = true, default_value = "42")]
+    seed: u64,
 }
 
 #[derive(Subcommand)]
@@ -114,25 +118,26 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     let batch_size = cli.batch;
+    let seed = cli.seed;
 
     match cli.command {
         Commands::RunAll { format } => {
-            run_all_benchmarks(&format, cli.output, cli.verbose, batch_size);
+            run_all_benchmarks(&format, cli.output, cli.verbose, batch_size, seed);
         }
         Commands::MixedWorkload { duration } => {
-            run_single_benchmark("mixed", duration, cli.output, batch_size);
+            run_single_benchmark("mixed", duration, cli.output, batch_size, seed);
         }
         Commands::SecurityAudit => {
-            run_single_benchmark("security", None, cli.output, batch_size);
+            run_single_benchmark("security", None, cli.output, batch_size, seed);
         }
         Commands::PerformanceStress => {
-            run_single_benchmark("performance", None, cli.output, batch_size);
+            run_single_benchmark("performance", None, cli.output, batch_size, seed);
         }
         Commands::Throughput { duration } => {
-            run_throughput_benchmark(duration, cli.output, batch_size);
+            run_throughput_benchmark(duration, cli.output, batch_size, seed);
         }
         Commands::Quick => {
-            run_single_benchmark("quick", None, cli.output, batch_size);
+            run_single_benchmark("quick", None, cli.output, batch_size, seed);
         }
         Commands::Pipeline {
             tier2_url,
@@ -140,7 +145,9 @@ fn main() {
             duration,
             send_batch,
         } => {
-            run_pipeline_benchmark(&tier2_url, &scenario, duration, send_batch, cli.output);
+            run_pipeline_benchmark(
+                &tier2_url, &scenario, duration, send_batch, cli.output, seed,
+            );
         }
         Commands::Compare { files, output } => {
             compare_results(&files, output);
@@ -158,7 +165,13 @@ fn main() {
     }
 }
 
-fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool, batch_size: usize) {
+fn run_all_benchmarks(
+    format: &str,
+    output: Option<String>,
+    verbose: bool,
+    batch_size: usize,
+    seed: u64,
+) {
     println!(
         "Running all benchmarks... (batch_size: {})\n",
         if batch_size > 0 {
@@ -177,6 +190,7 @@ fn run_all_benchmarks(format: &str, output: Option<String>, verbose: bool, batch
     .into_iter()
     .map(|mut c| {
         c.batch_size = batch_size;
+        c.simulation_seed = seed;
         c
     })
     .collect();
@@ -218,6 +232,7 @@ fn run_single_benchmark(
     duration_override: Option<u64>,
     output: Option<String>,
     batch_size: usize,
+    seed: u64,
 ) {
     let mut config = match name {
         "mixed" => scenarios::mixed_workload(),
@@ -229,6 +244,7 @@ fn run_single_benchmark(
 
     // Apply batch_size
     config.batch_size = batch_size;
+    config.simulation_seed = seed;
 
     // Apply duration override if specified
     let config = if let Some(duration) = duration_override {
@@ -241,13 +257,14 @@ fn run_single_benchmark(
     };
 
     println!(
-        "Running benchmark: {} (batch_size: {})\n",
+        "Running benchmark: {} (batch_size: {}, seed: {})\n",
         config.name,
         if batch_size > 0 {
             format!("{}", batch_size)
         } else {
             "single".to_string()
-        }
+        },
+        config.simulation_seed
     );
 
     let mut runner = BenchmarkRunner::new();
@@ -261,15 +278,16 @@ fn run_single_benchmark(
     }
 }
 
-fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: usize) {
+fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: usize, seed: u64) {
     println!(
-        "Running throughput test ({} minutes, batch_size: {})...\n",
+        "Running throughput test ({} minutes, batch_size: {}, seed: {})...\n",
         duration,
         if batch_size > 0 {
             format!("{}", batch_size)
         } else {
             "single".to_string()
-        }
+        },
+        seed
     );
 
     let config = BenchmarkConfig {
@@ -277,6 +295,7 @@ fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: u
         base_scenario: "normal_traffic".to_string(),
         duration_minutes: duration,
         tick_ms: 10, // Small tick for high throughput
+        simulation_seed: seed,
         anomalies: vec![],
         batch_size,
     };
@@ -297,6 +316,7 @@ fn run_pipeline_benchmark(
     duration: Option<u64>,
     send_batch: usize,
     output: Option<String>,
+    seed: u64,
 ) {
     let mut benchmark = scenario_by_name(scenario);
     if let Some(minutes) = duration {
@@ -307,6 +327,7 @@ fn run_pipeline_benchmark(
         benchmark,
         tier2_base_url: tier2_url.to_string(),
         send_batch_size: send_batch.max(1),
+        simulation_seed: seed,
         ..Default::default()
     };
 
@@ -315,8 +336,11 @@ fn run_pipeline_benchmark(
         tier2_url
     );
     println!(
-        "Scenario: {} | duration={}m | send_batch={}",
-        cfg.benchmark.name, cfg.benchmark.duration_minutes, cfg.send_batch_size
+        "Scenario: {} | duration={}m | send_batch={} | seed={}",
+        cfg.benchmark.name,
+        cfg.benchmark.duration_minutes,
+        cfg.send_batch_size,
+        cfg.simulation_seed
     );
 
     let mut runner = match PipelineBenchmarkRunner::new() {

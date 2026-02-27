@@ -71,10 +71,22 @@ pub struct StartRequest {
     pub scenario: String,
     #[serde(default = "default_intensity")]
     pub intensity: f64,
+    #[serde(default = "default_seed")]
+    pub seed: u64,
+    #[serde(default = "default_deterministic")]
+    pub deterministic: bool,
 }
 
 fn default_intensity() -> f64 {
     1.0
+}
+
+fn default_seed() -> u64 {
+    42
+}
+
+fn default_deterministic() -> bool {
+    true
 }
 
 /// Request to inject an anomaly
@@ -211,6 +223,10 @@ pub fn handle_list_scenarios() -> ApiResponse<ScenariosResponse> {
 pub fn handle_start(state: &SharedState, request: StartRequest) -> ApiResponse<SimulationStatus> {
     let mut state = state.lock().unwrap();
 
+    state.engine.set_determinism(crate::DeterminismConfig {
+        enabled: request.deterministic,
+        seed: request.seed,
+    });
     state.engine.start(&request.scenario);
 
     let status = SimulationStatus::from_engine(&state.engine);
@@ -396,6 +412,8 @@ mod tests {
             StartRequest {
                 scenario: "normal_traffic".to_string(),
                 intensity: 1.0,
+                seed: 42,
+                deterministic: true,
             },
         );
         assert!(start_response.success);
@@ -420,6 +438,8 @@ mod tests {
             StartRequest {
                 scenario: "normal_traffic".to_string(),
                 intensity: 1.0,
+                seed: 42,
+                deterministic: true,
             },
         );
 

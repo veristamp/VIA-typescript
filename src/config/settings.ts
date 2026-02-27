@@ -7,8 +7,8 @@ export const settings = {
 		retryBaseDelayMs: 200,
 	},
 	embedding: {
-		batchSize: 64,
-		maxConcurrency: 4,
+		batchSize: 32,
+		maxConcurrency: 1,
 		cacheTtlSec: 900,
 		maxRetries: 2,
 	},
@@ -26,6 +26,6 @@ export const settings = {
 	qdrant: {
 		host: "localhost",
 		port: 6333,
-		maxConcurrentUpserts: 4,
+		maxConcurrentUpserts: 1,
 	},
 } as const;

@@ -1,9 +1,8 @@
 use crate::core::{AnyValue, KeyValue, LogRecord};
-use crate::scenarios::Scenario;
 use crate::scenarios::traffic::create_log;
+use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
 use rand_distr::{Distribution, Normal};
-use uuid::Uuid;
 
 // --- 1. Memory Leak ---
 pub struct MemoryLeak {
@@ -32,16 +31,18 @@ impl Scenario for MemoryLeak {
     }
 
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
+        let mut rng = rng_for_tick("performance/memory_leak", current_time_ns, delta_ns);
         if self.has_crashed {
             // Restart sequence
             self.current_memory_mb = 256.0;
             self.has_crashed = false;
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             return vec![create_log(
                 "INFO",
                 format!("Service {} restarted successfully.", self.service_name),
                 &self.service_name,
-                &Uuid::new_v4().simple().to_string(),
-                &Uuid::new_v4().simple().to_string()[..16],
+                &trace_id,
+                &span_id,
                 current_time_ns,
                 vec![KeyValue {
                     key: "event".to_string(),
@@ -53,14 +54,12 @@ impl Scenario for MemoryLeak {
         let seconds = delta_ns as f64 / 1_000_000_000.0;
         self.current_memory_mb += self.leak_rate_mb_per_sec * seconds;
 
-        let mut rng = rand::rng();
         let mut logs = Vec::new();
 
         // Generate metric-like logs every second (probabilistically)
         if rng.random_bool(0.2) {
             // not every tick, but frequent
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             let level = if self.current_memory_mb > self.max_memory_mb * 0.9 {
                 "FATAL"
@@ -97,12 +96,13 @@ impl Scenario for MemoryLeak {
 
         if self.current_memory_mb >= self.max_memory_mb {
             self.has_crashed = true;
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
             logs.push(create_log(
                 "FATAL",
                 "OutOfMemoryError: Java heap space".to_string(),
                 &self.service_name,
-                &Uuid::new_v4().simple().to_string(),
-                &Uuid::new_v4().simple().to_string()[..16],
+                &trace_id,
+                &span_id,
                 current_time_ns,
                 vec![KeyValue {
                     key: "error.type".to_string(),
@@ -136,13 +136,12 @@ impl Scenario for CpuSpike {
     }
 
     fn tick(&mut self, current_time_ns: u64, _delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("performance/cpu_spike", current_time_ns, _delta_ns);
         let mut logs = Vec::new();
 
         // If intensity is high, we generate logs indicating slow processing or thread locking
         if rng.random_bool(self.intensity) {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             // High CPU usually manifests as timeouts or slow processing
             // Normal latency is ~55ms, CPU spike causes 3000-8000ms latency
@@ -191,11 +190,10 @@ impl Scenario for InfiniteLoop {
     }
 
     fn tick(&mut self, current_time_ns: u64, _delta_ns: u64) -> Vec<LogRecord> {
-        let mut rng = rand::rng();
+        let mut rng = rng_for_tick("performance/infinite_loop", current_time_ns, _delta_ns);
         // Rare but catastrophic event
         if rng.random_bool(0.05) {
-            let trace_id = Uuid::new_v4().simple().to_string();
-            let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
             vec![create_log(
                 "ERROR",

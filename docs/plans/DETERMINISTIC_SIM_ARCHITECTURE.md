@@ -120,7 +120,22 @@ Per-anomaly metrics minimum:
 
 ## Boundaries: What Stays in Rust vs Elsewhere
 
-### Keep in Rust
+### Primary Benchmark Mode (Recommended)
+
+Run the production services as black boxes:
+
+1. external deterministic simulator emits logs/events
+2. send into Tier-1 via public ingest API
+3. allow normal Tier-1 -> Tier-2 forwarding path
+4. collect benchmark metrics from public analysis APIs and benchmark-tagged records
+
+Rules:
+
+- no in-process shortcuts in this mode
+- no policy publish/rollback side effects
+- all records tagged by benchmark `run_id`
+
+### Keep in Rust (Implementation Location)
 
 1. Event generation and anomaly injection (`via-sim`)
 2. Tier1 scoring path benchmark (`via-bench` + `via-core`)
@@ -167,8 +182,9 @@ Exit criterion:
 ## Phase 3 (E2E Trustability)
 
 1. Enforce deterministic mode in `pipeline` benchmark command.
-2. Add regression tests for known manifests with expected metrics bands.
-3. Add CI check to detect deterministic drift.
+2. Add black-box pipeline mode as default; keep in-process mode for micro-benchmark only.
+3. Add regression tests for known manifests with expected metrics bands.
+4. Add CI check to detect deterministic drift.
 
 Exit criterion:
 

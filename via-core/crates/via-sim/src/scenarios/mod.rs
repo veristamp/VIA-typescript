@@ -12,6 +12,12 @@ pub mod security;
 pub mod traffic;
 
 use crate::core::LogRecord;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static DETERMINISM_ENABLED: AtomicBool = AtomicBool::new(false);
+static DETERMINISM_SEED: AtomicU64 = AtomicU64::new(0);
+static SCENARIO_INIT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Trait for simulation scenarios
 ///
@@ -31,6 +37,50 @@ pub trait Scenario: Send {
     /// # Returns
     /// Vector of log records generated during this time step
     fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord>;
+}
+
+pub fn configure_determinism(enabled: bool, seed: u64) {
+    DETERMINISM_ENABLED.store(enabled, Ordering::Relaxed);
+    DETERMINISM_SEED.store(seed, Ordering::Relaxed);
+    SCENARIO_INIT_COUNTER.store(0, Ordering::Relaxed);
+}
+
+pub fn reset_determinism() {
+    DETERMINISM_ENABLED.store(false, Ordering::Relaxed);
+    DETERMINISM_SEED.store(0, Ordering::Relaxed);
+    SCENARIO_INIT_COUNTER.store(0, Ordering::Relaxed);
+}
+
+fn compose_seed(tag: &str, n1: u64, n2: u64, n3: u64) -> u64 {
+    let base = DETERMINISM_SEED.load(Ordering::Relaxed);
+    let key = format!("{base}:{tag}:{n1}:{n2}:{n3}");
+    xxhash_rust::xxh3::xxh3_64(key.as_bytes())
+}
+
+pub fn rng_for_tick(tag: &str, current_time_ns: u64, delta_ns: u64) -> StdRng {
+    if DETERMINISM_ENABLED.load(Ordering::Relaxed) {
+        return StdRng::seed_from_u64(compose_seed(tag, current_time_ns, delta_ns, 0));
+    }
+    let mut trng = rand::rng();
+    StdRng::seed_from_u64(trng.random())
+}
+
+pub fn rng_for_init(tag: &str) -> StdRng {
+    if DETERMINISM_ENABLED.load(Ordering::Relaxed) {
+        let idx = SCENARIO_INIT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        return StdRng::seed_from_u64(compose_seed(tag, idx, 0, 0));
+    }
+    let mut trng = rand::rng();
+    StdRng::seed_from_u64(trng.random())
+}
+
+pub fn next_trace_and_span_ids<R: Rng + ?Sized>(rng: &mut R) -> (String, String) {
+    let t1: u64 = rng.random();
+    let t2: u64 = rng.random();
+    let trace_id = format!("{t1:016x}{t2:016x}");
+    let span: u64 = rng.random();
+    let span_id = format!("{span:016x}");
+    (trace_id, span_id)
 }
 
 // Re-export common scenarios for convenience
