@@ -3,7 +3,7 @@
 //! Forwards anomaly signals from Tier-1 (Rust) to Tier-2 (Bun) via HTTP.
 //! Implements bounded async forwarding with retry and backpressure.
 
-use crate::signal::{AnomalySignal, NUM_DETECTORS};
+use crate::signal::AnomalySignal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -22,6 +22,7 @@ use once_cell::sync::Lazy;
 use prometheus::{Counter, Encoder, Gauge, Histogram, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use tokio::net::TcpListener;
@@ -30,7 +31,7 @@ use tracing::{error, info, warn};
 use via_core::{
     engine::AnomalyProfile,
     feedback::{FeedbackEvent, FeedbackLabelClass, FeedbackSource},
-    forwarder::{ForwarderConfig, Tier1SignalV1, Tier2Forwarder},
+    forwarder::{ForwarderConfig, Tier2Forwarder},
     policy::{PolicySnapshot, runtime as policy_runtime},
     registry::{ProfileRegistry, RegistryConfig},
     signal::{AnomalySignal, NUM_DETECTORS},
@@ -697,15 +698,48 @@ struct StatsResponse {
     signal_schema_version: u16,
     detectors: u8,
     policy_version: String,
+    tier2_forwarding_enabled: bool,
+    tier2_forwarded_sent: u64,
+    tier2_forwarded_failed: u64,
+    tier2_forwarded_retried: u64,
+    tier2_forwarded_dropped: u64,
+    tier2_forwarded_batches: u64,
     status: &'static str,
 }
 
-async fn stats_handler() -> Json<StatsResponse> {
+async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
+    let (
+        tier2_forwarding_enabled,
+        tier2_forwarded_sent,
+        tier2_forwarded_failed,
+        tier2_forwarded_retried,
+        tier2_forwarded_dropped,
+        tier2_forwarded_batches,
+    ) = if let Some(ref forwarder) = state.forwarder {
+        let stats = forwarder.stats();
+        (
+            true,
+            stats.sent.load(Ordering::Relaxed),
+            stats.failed.load(Ordering::Relaxed),
+            stats.retried.load(Ordering::Relaxed),
+            stats.dropped.load(Ordering::Relaxed),
+            stats.batches.load(Ordering::Relaxed),
+        )
+    } else {
+        (false, 0, 0, 0, 0, 0)
+    };
+
     Json(StatsResponse {
         version: GATEKEEPER_VERSION,
         signal_schema_version: SIGNAL_SCHEMA_VERSION,
         detectors: NUM_DETECTORS as u8,
         policy_version: policy_runtime().current_version(),
+        tier2_forwarding_enabled,
+        tier2_forwarded_sent,
+        tier2_forwarded_failed,
+        tier2_forwarded_retried,
+        tier2_forwarded_dropped,
+        tier2_forwarded_batches,
         status: "operational",
     })
 }
@@ -847,12 +881,12 @@ async fn run() -> Result<(), String> {
         .route("/stats", get(stats_handler))
         .with_state(state.clone());
 
-    let addr = "0.0.0.0:3000";
-    let listener = TcpListener::bind(addr)
+    let addr = std::env::var("GATEKEEPER_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let listener = TcpListener::bind(&addr)
         .await
         .map_err(|e| format!("failed to bind {}: {}", addr, e))?;
 
-    info!(addr, "Gatekeeper listening.");
+    info!(addr = %addr, "Gatekeeper listening.");
     info!("Endpoints:");
     info!("  POST /ingest       - Single event ingestion");
     info!("  POST /ingest/batch - Batch event ingestion");

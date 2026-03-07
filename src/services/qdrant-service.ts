@@ -825,26 +825,24 @@ export class QdrantService {
 		for (const word of words) {
 			freq.set(word, (freq.get(word) ?? 0) + 1);
 		}
-		const indexWeight = new Map<number, number>();
-
+		const byIndex = new Map<number, number>();
 		for (const [word, count] of freq.entries()) {
 			const hash = Bun.hash.xxHash64(word);
 			const hashValue = Number(hash & 0xffffffffn);
-			const idx = hashValue % 16384;
-			const weight = 1 + count / Math.max(words.length, 1);
-			indexWeight.set(idx, (indexWeight.get(idx) ?? 0) + weight);
+			const index = hashValue % 16384;
+			const value = 1 + count / Math.max(words.length, 1);
+			byIndex.set(index, (byIndex.get(index) ?? 0) + value);
 		}
 
-		const sorted = Array.from(indexWeight.entries()).sort(
-			(a, b) => a[0] - b[0],
-		);
-		const indices = sorted.map(([idx]) => idx);
-		const values = sorted.map(([, weight]) => weight);
+		const sorted = Array.from(byIndex.entries()).sort((a, b) => a[0] - b[0]);
+		const indices = sorted.map(([index]) => index);
+		const values = sorted.map(([, value]) => value);
 
 		return { indices, values };
 	}
 
 	private generateId(): string {
+		return crypto.randomUUID();
 		return crypto.randomUUID();
 	}
 }
