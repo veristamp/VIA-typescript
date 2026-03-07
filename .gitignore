@@ -35,3 +35,5 @@ target
 bun.lock
 cargo.Lock
 qdrant_data
+via-core/Cargo.lock
+via-core/anomalies_2026030804.jsonl

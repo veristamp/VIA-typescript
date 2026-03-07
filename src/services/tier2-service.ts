@@ -33,7 +33,13 @@ export class Tier2Service {
 		) {
 			return Math.floor(Date.now() / 1000) + Math.floor(numericTs / 1e9);
 		}
-		if (numericTs > 1e15) return Math.floor(numericTs / 1e9);
+		// Timestamp unit detection:
+		// - nanoseconds: > 1e15 (past year 2001) or > 1e10 (typical nanosecond timestamps)
+		// - milliseconds: > 1e12 and <= 1e15 
+		// - seconds: <= 1e12
+		if (numericTs > 1e15 || (numericTs > 1e10 && numericTs <= 1e12)) {
+			return Math.floor(numericTs / 1e9);
+		}
 		if (numericTs > 1e12) return Math.floor(numericTs / 1e3);
 		return Math.floor(numericTs);
 	}
@@ -127,8 +133,9 @@ export class Tier2Service {
 
 		await this.qdrant.ingestToTier2(events);
 
-		const endTs = Math.floor(Date.now() / 1000);
-		const startTs = endTs - 3600;
+		const timestamps = normalized.map(e => e.timestamp);
+		const endTs = Math.max(...timestamps);
+		const startTs = Math.min(...timestamps);
 		const candidates = await this.forensic.deriveIncidentCandidates(
 			startTs,
 			endTs,

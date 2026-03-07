@@ -1,7 +1,7 @@
-use crate::{AnomalySpec, BenchmarkConfig, calculate_metrics, scenarios};
+use crate::{calculate_metrics, scenarios, AnomalySpec, BenchmarkConfig};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use via_core::engine::AnomalyProfile;

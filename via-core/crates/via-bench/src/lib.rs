@@ -537,22 +537,35 @@ pub mod scenarios {
         BenchmarkConfig {
             name: "Mixed Workload - All Anomaly Types".to_string(),
             base_scenario: "normal_traffic".to_string(),
-            duration_minutes: 5,
+            duration_minutes: 6,
             tick_ms: 100,
             anomalies: vec![
+                // Security scenarios
                 AnomalySpec {
                     scenario: "credential_stuffing".to_string(),
-                    start_time_sec: 60,
+                    start_time_sec: 30,
                     duration_sec: 60,
                 },
+                AnomalySpec {
+                    scenario: "ddos".to_string(),
+                    start_time_sec: 120,
+                    duration_sec: 30,
+                },
+                // Performance scenarios
                 AnomalySpec {
                     scenario: "memory_leak".to_string(),
                     start_time_sec: 180,
                     duration_sec: 120,
                 },
                 AnomalySpec {
-                    scenario: "traffic_spike".to_string(),
+                    scenario: "slow_queries".to_string(),
                     start_time_sec: 240,
+                    duration_sec: 45,
+                },
+                // Distributed scenarios
+                AnomalySpec {
+                    scenario: "traffic_spike".to_string(),
+                    start_time_sec: 300,
                     duration_sec: 30,
                 },
             ],

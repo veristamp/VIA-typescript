@@ -152,7 +152,7 @@ pub static FEEDBACK_RECEIVED: Lazy<Counter> = Lazy::new(|| {
 // DATA TYPES
 // ============================================================================
 
-/// External API: Ingest Event
+/// External API: Ingest Event (legacy simple format)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IngestEvent {
     /// User/Entity ID
@@ -161,6 +161,83 @@ pub struct IngestEvent {
     pub v: f64,
     /// Timestamp (nanoseconds)
     pub t: u64,
+}
+
+// ============================================================================
+// OTel Log Format Types (industry standard)
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[allow(non_snake_case)]
+pub struct OTelLogBatch {
+    pub resourceLogs: Vec<OTelResourceLog>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[allow(non_snake_case)]
+pub struct OTelResourceLog {
+    pub resource: OTelResource,
+    pub scopeLogs: Vec<OTelScopeLog>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct OTelResource {
+    pub attributes: Vec<OTelKeyValue>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[allow(non_snake_case)]
+pub struct OTelScopeLog {
+    pub logRecords: Vec<OTelLogRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[allow(non_snake_case)]
+pub struct OTelLogRecord {
+    pub timeUnixNano: String,
+    pub traceId: String,
+    pub spanId: String,
+    pub severityNumber: u32,
+    pub severityText: String,
+    pub body: OTelAnyValue,
+    pub attributes: Vec<OTelKeyValue>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isGroundTruthAnomaly: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anomalyId: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OTelKeyValue {
+    pub key: String,
+    pub value: OTelAnyValue,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum OTelAnyValue {
+    StringValue(String),
+    BoolValue(bool),
+    IntValue(i64),
+    DoubleValue(f64),
+}
+
+impl OTelAnyValue {
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            OTelAnyValue::DoubleValue(v) => Some(*v),
+            OTelAnyValue::IntValue(v) => Some(*v as f64),
+            OTelAnyValue::StringValue(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+    
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            OTelAnyValue::StringValue(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// Internal: Zero-allocation event
@@ -628,6 +705,54 @@ async fn ingest_batch(
     StatusCode::ACCEPTED
 }
 
+async fn ingest_otel(
+    State(state): State<AppState>,
+    Json(batch): Json<OTelLogBatch>,
+) -> StatusCode {
+    let mut total_events = 0u64;
+    
+    for resource_log in batch.resourceLogs {
+        for scope_log in resource_log.scopeLogs {
+            for record in scope_log.logRecords {
+                total_events += 1;
+                
+                // Extract entity ID from attributes (service.name or custom entity.id)
+                let entity_id = record.attributes.iter()
+                    .find(|kv| kv.key == "service.name" || kv.key == "entity.id")
+                    .and_then(|kv| kv.value.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                
+                // Extract metric value from attributes
+                let metric_value = record.attributes.iter()
+                    .find(|kv| matches!(kv.key.as_str(), 
+                        "http.duration_ms" | "latency_ms" | 
+                        "process.memory.usage" | "process.cpu.utilization" |
+                        "http.status_code" | "value"))
+                    .and_then(|kv| kv.value.as_f64())
+                    .unwrap_or(0.0);
+                
+                // Parse timestamp
+                let timestamp_ns: u64 = record.timeUnixNano.parse().unwrap_or(0);
+                
+                let event = IngestEvent {
+                    u: entity_id,
+                    v: metric_value,
+                    t: timestamp_ns,
+                };
+                
+                if state.ingest_tx.try_send(IngestPacket::Single(event)).is_err() {
+                    DROPPED_INGEST_QUEUE.inc();
+                    DROPPED_TOTAL.inc();
+                }
+            }
+        }
+    }
+    
+    INGEST_TOTAL.inc_by(total_events as f64);
+    StatusCode::ACCEPTED
+}
+
 async fn feedback_handler(
     State(state): State<AppState>,
     Json(feedback): Json<ApiFeedbackRequest>,
@@ -872,6 +997,7 @@ async fn run() -> Result<(), String> {
     let app = Router::new()
         .route("/ingest", post(ingest))
         .route("/ingest/batch", post(ingest_batch))
+        .route("/ingest/otel", post(ingest_otel))
         .route("/feedback", post(feedback_handler))
         .route("/policy/snapshot", post(policy_snapshot_handler))
         .route("/policy/version", get(policy_version_handler))
@@ -890,6 +1016,7 @@ async fn run() -> Result<(), String> {
     info!("Endpoints:");
     info!("  POST /ingest       - Single event ingestion");
     info!("  POST /ingest/batch - Batch event ingestion");
+    info!("  POST /ingest/otel  - OTel log format ingestion");
     info!(
         "  POST /feedback     - Tier-2 feedback for weight learning (accepts 'entity_id' string or 'entity_hash')"
     );

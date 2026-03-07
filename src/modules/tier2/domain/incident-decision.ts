@@ -10,9 +10,9 @@ export function resolveIncidentDecision(
 ): ResolvedIncidentDecision {
 	const confidence = Math.max(0, Math.min(1, candidate.confidence));
 	const status: IncidentStatus =
-		candidate.severityMax >= 0.9 || candidate.scoreMax >= 0.95
+		candidate.severityMax >= 0.5 || candidate.scoreMax >= 0.6
 			? "escalated"
-			: candidate.memberPointIds.length >= 3 && confidence >= 0.8
+			: candidate.memberPointIds.length >= 2 && confidence >= 0.3
 				? "merged"
 				: "new";
 

@@ -186,7 +186,7 @@ export class ForensicAnalysisService {
 			}
 
 			const ts = this.extractTs(payload);
-			const bucket = Math.floor(ts / 300);
+			const bucket = Math.floor(ts / 60);
 			const arr = byTemporalBucket.get(String(bucket)) ?? [];
 			arr.push(hit);
 			byTemporalBucket.set(String(bucket), arr);
@@ -195,9 +195,13 @@ export class ForensicAnalysisService {
 		const acc = new Map<string, CandidateAccumulator>();
 
 		for (const [traceId, grouped] of byTrace.entries()) {
-			if (grouped.length < 2) continue;
+			const highSignalHits = grouped.filter(h => {
+				const p = (h.payload || {}) as Record<string, unknown>;
+				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
+			});
+			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId("trace", traceId, 0);
-			for (const hit of grouped) {
+			for (const hit of highSignalHits) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -211,9 +215,13 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [rhythmHash, grouped] of byRhythm.entries()) {
-			if (grouped.length < 2) continue;
+			const highSignalHits = grouped.filter(h => {
+				const p = (h.payload || {}) as Record<string, unknown>;
+				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
+			});
+			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
-			for (const hit of grouped) {
+			for (const hit of highSignalHits) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -227,13 +235,17 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [bucket, grouped] of byTemporalBucket.entries()) {
-			if (grouped.length < 2) continue;
+			const highSignalHits = grouped.filter(h => {
+				const p = (h.payload || {}) as Record<string, unknown>;
+				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
+			});
+			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId(
 				"temporal",
 				bucket,
-				Number(bucket) * 300,
+				Number(bucket) * 60,
 			);
-			for (const hit of grouped) {
+			for (const hit of highSignalHits) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -249,7 +261,7 @@ export class ForensicAnalysisService {
 		const candidates: IncidentCandidate[] = [];
 		for (const [incidentId, value] of acc.entries()) {
 			const memberCount = value.memberPointIds.size;
-			if (value.reason === "temporal" && memberCount < 3) {
+			if (value.reason === "temporal" && memberCount < 2) {
 				continue;
 			}
 			if ((value.reason === "semantic" || value.reason === "trace") && memberCount < 2) {
@@ -304,9 +316,9 @@ export class ForensicAnalysisService {
 		const seededCandidates: IncidentCandidate[] = seedEvents
 			.filter(
 				(event) =>
-					event.confidence >= 0.9 ||
-					event.severity >= 0.85 ||
-					event.score >= 0.95,
+					event.confidence >= 0.6 ||
+					event.severity >= 0.5 ||
+					event.score >= 0.5,
 			)
 			.map((event) => ({
 			incidentId:
