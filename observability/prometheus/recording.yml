@@ -1,0 +1,69 @@
+groups:
+  - name: mono-auth-core-recording
+    interval: 30s
+    rules:
+      - record: mono_auth:http:request_rate5m
+        expr: sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m]))
+
+      - record: mono_auth:http:5xx_ratio5m
+        expr: |
+          sum by (job) (rate(http_requests_total{job="mono-auth-app",status="5xx"}[5m]))
+          /
+          clamp_min(sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m])), 0.001)
+
+      - record: mono_auth:http:latency_p95_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (
+              rate(http_request_duration_seconds_bucket{job="mono-auth-app"}[5m])
+            )
+          )
+
+      - record: mono_auth:auth:signin_latency_p99_seconds5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (job, le) (
+              rate(auth_handler_duration_seconds_bucket{job="mono-auth-app",endpoint="sign-in"}[5m])
+            )
+          )
+
+      - record: mono_auth:auth:failures_increase10m
+        expr: sum by (job) (increase(auth_failures_total{job="mono-auth-app"}[10m]))
+
+      - record: mono_auth:db:latency_p95_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (
+              rate(db_query_duration_seconds_bucket{job="mono-auth-app"}[5m])
+            )
+          )
+
+      - record: mono_auth:db:in_flight_avg5m
+        expr: avg_over_time(db_in_flight_queries{job="mono-auth-app"}[5m])
+
+      - record: mono_auth:cache:get_hit_ratio10m
+        expr: |
+          sum by (job) (rate(cache_ops_total{job="mono-auth-app",op="get",result="hit"}[10m]))
+          /
+          clamp_min(sum by (job) (rate(cache_ops_total{job="mono-auth-app",op="get"}[10m])), 0.001)
+
+      - record: mono_auth:rate_limit:hits_rate5m
+        expr: sum by (job) (rate(rate_limit_hits_total{job="mono-auth-app"}[5m]))
+
+      - record: mono_auth:mcp:token_verification_failure_ratio10m
+        expr: |
+          sum by (job) (rate(mcp_token_verifications_total{job="mono-auth-app",valid="false"}[10m]))
+          /
+          clamp_min(sum by (job) (rate(mcp_token_verifications_total{job="mono-auth-app"}[10m])), 0.001)
+
+      - record: mono_auth:auth:password_queue_wait_p95_seconds5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (
+              rate(semaphore_queue_wait_seconds_bucket{job="mono-auth-app"}[5m])
+            )
+          )

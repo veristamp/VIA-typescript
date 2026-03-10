@@ -1,0 +1,40 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 2h
+  receiver: 'notifications'
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: 'notifications'
+      group_wait: 10s
+      repeat_interval: 30m
+
+receivers:
+  - name: 'notifications'
+    webhook_configs:
+      - url: '__ALERTMANAGER_WEBHOOK_URL__'
+        send_resolved: true
+    slack_configs:
+      - api_url: '__ALERTMANAGER_SLACK_WEBHOOK_URL__'
+        channel: '__ALERTMANAGER_SLACK_CHANNEL__'
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        text: |
+          *Service:* {{ .CommonLabels.service }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *StartsAt:* {{ .Alerts.Firing | len }} firing
+        mrkdwn_in: ['text', 'pretext']
+
+inhibit_rules:
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: ['alertname', 'service']

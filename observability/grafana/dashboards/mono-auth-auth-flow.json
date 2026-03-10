@@ -1,0 +1,123 @@
+{
+	"id": null,
+	"uid": "mono-auth-auth-flow",
+	"title": "Mono Auth Auth Flow",
+	"tags": ["mono-auth", "auth"],
+	"timezone": "browser",
+	"schemaVersion": 39,
+	"version": 1,
+	"refresh": "15s",
+	"time": {
+		"from": "now-6h",
+		"to": "now"
+	},
+	"templating": {
+		"list": [
+			{
+				"name": "job",
+				"type": "query",
+				"datasource": { "type": "prometheus", "uid": "prometheus" },
+				"query": "label_values(up{app=\"mono-auth\"}, job)",
+				"current": {
+					"selected": true,
+					"text": "mono-auth-app",
+					"value": "mono-auth-app"
+				},
+				"includeAll": false,
+				"multi": false,
+				"refresh": 1
+			}
+		]
+	},
+	"panels": [
+		{
+			"type": "stat",
+			"title": "Sign-in Success Rate (5m)",
+			"gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "100 * ((sum(rate(login_attempts_total{job=\"$job\",success=\"true\"}[5m])) or vector(0)) / clamp_min((sum(rate(login_attempts_total{job=\"$job\"}[5m])) or vector(0)), 0.001))",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Concurrent Logins",
+			"gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{ "expr": "max(concurrent_logins{job=\"$job\"})", "refId": "A" }
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Active Sessions (Observed)",
+			"gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{ "expr": "max(active_sessions_count{job=\"$job\"})", "refId": "A" }
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "timeseries",
+			"title": "Login Attempts by Outcome",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (success, method) (rate(login_attempts_total{job=\"$job\"}[5m]))",
+					"legendFormat": "success={{success}}, method={{method}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Auth Handler Latency p50/p95/p99",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "histogram_quantile(0.50, sum by (le, endpoint) (rate(auth_handler_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p50 {{endpoint}}",
+					"refId": "A"
+				},
+				{
+					"expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(auth_handler_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p95 {{endpoint}}",
+					"refId": "B"
+				},
+				{
+					"expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(auth_handler_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p99 {{endpoint}}",
+					"refId": "C"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Auth Failures by Endpoint and Error Type",
+			"gridPos": { "h": 8, "w": 24, "x": 0, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (endpoint, error_type) (rate(auth_failures_total{job=\"$job\"}[5m])) or on() vector(0)",
+					"legendFormat": "{{endpoint}}/{{error_type}}",
+					"refId": "A"
+				}
+			]
+		}
+	]
+}

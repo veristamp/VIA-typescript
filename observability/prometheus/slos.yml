@@ -1,0 +1,151 @@
+groups:
+  - name: mono-auth-slo-recording
+    interval: 30s
+    rules:
+      - record: slo:http:request_rate5m
+        expr: sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m]))
+
+      - record: slo:http:request_rate1h
+        expr: sum by (job) (rate(http_requests_total{job="mono-auth-app"}[1h]))
+
+      - record: slo:availability:ratio_rate5m
+        expr: |
+          (
+            (
+              sum by (job) (rate(http_requests_total{job="mono-auth-app",status!="5xx"}[5m]))
+              /
+              clamp_min(sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m])), 0.001)
+            )
+            * (sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m])) > bool 0)
+          )
+          + (sum by (job) (rate(http_requests_total{job="mono-auth-app"}[5m])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:availability:ratio_rate1h
+        expr: |
+          (
+            (
+              sum by (job) (rate(http_requests_total{job="mono-auth-app",status!="5xx"}[1h]))
+              /
+              clamp_min(sum by (job) (rate(http_requests_total{job="mono-auth-app"}[1h])), 0.001)
+            )
+            * (sum by (job) (rate(http_requests_total{job="mono-auth-app"}[1h])) > bool 0)
+          )
+          + (sum by (job) (rate(http_requests_total{job="mono-auth-app"}[1h])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:availability:error_budget_burn_rate5m
+        expr: |
+          (1 - slo:availability:ratio_rate5m) / (1 - 0.999)
+
+      - record: slo:availability:error_budget_burn_rate1h
+        expr: |
+          (1 - slo:availability:ratio_rate1h) / (1 - 0.999)
+
+      - record: slo:latency:lt500ms_ratio_rate5m
+        expr: |
+          (
+            (
+              sum by (job) (rate(http_request_duration_seconds_bucket{job="mono-auth-app",le="0.5"}[5m]))
+              /
+              clamp_min(sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[5m])), 0.001)
+            )
+            * (sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[5m])) > bool 0)
+          )
+          + (sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[5m])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:latency:lt500ms_ratio_rate1h
+        expr: |
+          (
+            (
+              sum by (job) (rate(http_request_duration_seconds_bucket{job="mono-auth-app",le="0.5"}[1h]))
+              /
+              clamp_min(sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[1h])), 0.001)
+            )
+            * (sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[1h])) > bool 0)
+          )
+          + (sum by (job) (rate(http_request_duration_seconds_count{job="mono-auth-app"}[1h])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:latency:error_budget_burn_rate5m
+        expr: |
+          (1 - slo:latency:lt500ms_ratio_rate5m) / (1 - 0.95)
+
+      - record: slo:latency:error_budget_burn_rate1h
+        expr: |
+          (1 - slo:latency:lt500ms_ratio_rate1h) / (1 - 0.95)
+
+      - record: slo:auth_signin:attempt_rate5m
+        expr: sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[5m]))
+
+      - record: slo:auth_signin:attempt_rate1h
+        expr: sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[1h]))
+
+      - record: slo:auth_signin_success:ratio_rate5m
+        expr: |
+          (
+            (
+              sum by (job) (rate(login_attempts_total{job="mono-auth-app",success="true"}[5m]))
+              /
+              clamp_min(sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[5m])), 0.001)
+            )
+            * (sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[5m])) > bool 0)
+          )
+          + (sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[5m])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:auth_signin_success:ratio_rate1h
+        expr: |
+          (
+            (
+              sum by (job) (rate(login_attempts_total{job="mono-auth-app",success="true"}[1h]))
+              /
+              clamp_min(sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[1h])), 0.001)
+            )
+            * (sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[1h])) > bool 0)
+          )
+          + (sum by (job) (rate(login_attempts_total{job="mono-auth-app"}[1h])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:auth_signin_success:error_budget_burn_rate5m
+        expr: |
+          (1 - slo:auth_signin_success:ratio_rate5m) / (1 - 0.99)
+
+      - record: slo:auth_signin_success:error_budget_burn_rate1h
+        expr: |
+          (1 - slo:auth_signin_success:ratio_rate1h) / (1 - 0.99)
+
+      - record: slo:auth_signin_latency:lt1s_ratio_rate5m
+        expr: |
+          (
+            (
+              sum by (job) (rate(auth_handler_duration_seconds_bucket{job="mono-auth-app",endpoint="sign-in",le="1"}[5m]))
+              /
+              clamp_min(sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[5m])), 0.001)
+            )
+            * (sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[5m])) > bool 0)
+          )
+          + (sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[5m])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:auth_signin_latency:lt1s_ratio_rate1h
+        expr: |
+          (
+            (
+              sum by (job) (rate(auth_handler_duration_seconds_bucket{job="mono-auth-app",endpoint="sign-in",le="1"}[1h]))
+              /
+              clamp_min(sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[1h])), 0.001)
+            )
+            * (sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[1h])) > bool 0)
+          )
+          + (sum by (job) (rate(auth_handler_duration_seconds_count{job="mono-auth-app",endpoint="sign-in"}[1h])) == bool 0)
+          or on(job) (max by (job) (up{job="mono-auth-app"}) * 0 + 1)
+
+      - record: slo:auth_signin_latency:error_budget_burn_rate5m
+        expr: |
+          (1 - slo:auth_signin_latency:lt1s_ratio_rate5m) / (1 - 0.95)
+
+      - record: slo:auth_signin_latency:error_budget_burn_rate1h
+        expr: |
+          (1 - slo:auth_signin_latency:lt1s_ratio_rate1h) / (1 - 0.95)

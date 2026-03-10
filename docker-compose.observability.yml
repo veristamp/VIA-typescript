@@ -1,0 +1,150 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mono-auth-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+      - '--enable-feature=exemplar-storage'
+      - '--enable-feature=native-histograms'
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/recording.yml:/etc/prometheus/recording.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - ./observability/prometheus/slos.yml:/etc/prometheus/slos.yml:ro
+      - ./observability/secrets/metrics_token:/run/secrets/metrics_token:ro
+      - prometheus_data:/prometheus
+    ports:
+      - '127.0.0.1:9090:9090'
+    restart: unless-stopped
+    networks:
+      - default
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: mono-auth-alertmanager
+    env_file:
+      - .env.docker
+    entrypoint: ['/bin/sh', '-ec']
+    command:
+      - |
+        esc() { printf '%s' "$1" | sed -e 's/[&|]/\\&/g'; }
+        webhook_url="$${ALERTMANAGER_WEBHOOK_URL:-http://alert-placeholder.invalid/alerts}"
+        slack_url="$${ALERTMANAGER_SLACK_WEBHOOK_URL:-http://alert-placeholder.invalid/slack}"
+        slack_channel="$${ALERTMANAGER_SLACK_CHANNEL:-#alerts}"
+        webhook_url_escaped="$$(esc "$${webhook_url}")"
+        slack_url_escaped="$$(esc "$${slack_url}")"
+        slack_channel_escaped="$$(esc "$${slack_channel}")"
+
+        sed \
+          -e "s|__ALERTMANAGER_WEBHOOK_URL__|$${webhook_url_escaped}|g" \
+          -e "s|__ALERTMANAGER_SLACK_WEBHOOK_URL__|$${slack_url_escaped}|g" \
+          -e "s|__ALERTMANAGER_SLACK_CHANNEL__|$${slack_channel_escaped}|g" \
+          /etc/alertmanager/alertmanager.yml > /tmp/alertmanager.generated.yml
+
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.generated.yml \
+          --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - '127.0.0.1:9093:9093'
+    restart: unless-stopped
+    networks:
+      - default
+
+  loki:
+    image: grafana/loki:latest
+    container_name: mono-auth-loki
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - '127.0.0.1:3100:3100'
+    restart: unless-stopped
+    networks:
+      - default
+
+  tempo:
+    image: grafana/tempo:2.9.1
+    container_name: mono-auth-tempo
+    user: "0:0"
+    command:
+      - '-target=all'
+      - '-config.file=/etc/tempo/tempo.yml'
+    volumes:
+      - ./observability/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - '127.0.0.1:3200:3200' # Tempo Query API (for Grafana)
+    restart: unless-stopped
+    networks:
+      - default
+
+
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: mono-auth-alloy
+    command: ['run', '/etc/alloy/alloy.config']
+    volumes:
+      - ./observability/alloy/alloy.config:/etc/alloy/alloy.config:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "4317:4317" # Alloy OTLP gRPC
+      - "4318:4318" # Alloy OTLP HTTP
+      - "12345:12345" # Alloy Prometheus metrics
+    depends_on:
+      - loki
+      - tempo
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - default
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mono-auth-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-change_me_now}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
+      - GF_PLUGINS_DISABLE_PLUGINS=grafana-exploretraces-app,grafana-lokiexplore-app
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+      - alertmanager
+      - tempo
+    ports:
+      - '127.0.0.1:3000:3000'
+    restart: unless-stopped
+    networks:
+      - default
+
+volumes:
+  prometheus_data:
+    name: mono-auth-prometheus-data
+  loki_data:
+    name: mono-auth-loki-data
+  grafana_data:
+    name: mono-auth-grafana-data
+  alertmanager_data:
+    name: mono-auth-alertmanager-data
+  tempo_data:
+    name: mono-auth-tempo-data
+
+networks:
+  default:
+    external: true
+    name: mono-auth-network

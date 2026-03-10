@@ -1,0 +1,75 @@
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  trace_idle_period: 5s
+  max_block_duration: 1m
+  complete_block_timeout: 1m
+
+backend_worker:
+  compaction:
+    block_retention: 720h
+
+querier:
+  max_concurrent_queries: 20
+  trace_by_id:
+    query_timeout: 10s
+  search:
+    query_timeout: 30s
+
+query_frontend:
+  search:
+    concurrent_jobs: 200
+    target_bytes_per_job: 104857600
+    max_duration: 24h
+    query_backend_after: 0s
+  trace_by_id:
+    query_shards: 20
+  mcp_server:
+    enabled: true
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+    blocklist_poll: 10s
+    pool:
+      max_workers: 200
+      queue_depth: 10000
+
+metrics_generator:
+  disable_grpc: false
+  registry:
+    external_labels:
+      source: tempo
+      cluster: docker-compose
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: ["span-metrics", "service-graphs"]
+      generate_native_histograms: both
+
+usage_report:
+  reporting_enabled: false

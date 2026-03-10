@@ -1,9 +1,11 @@
 import { tier2IncidentGraphRepository } from "../modules/tier2/adapters/registry-repositories";
 import type { Tier2IncidentGraphRepository } from "../modules/tier2/ports/repositories";
 import type { CanonicalTier2Event, IncidentCandidate } from "../types";
+import type { LGTMService } from "./lgtm-service";
 import type { QdrantScoredPoint, QdrantService } from "./qdrant-service";
 
 export interface ClusterResult {
+// ... existing ClusterResult ...
 	clusterId: string | number;
 	incidentCount: number;
 	topHit: {
@@ -35,8 +37,24 @@ interface CandidateAccumulator {
 export class ForensicAnalysisService {
 	constructor(
 		private readonly qdrantService: QdrantService,
+		private readonly lgtmService: LGTMService,
 		private readonly incidentGraphRepository: Tier2IncidentGraphRepository = tier2IncidentGraphRepository,
 	) {}
+
+	async enrichIncident(incidentId: string, traceId: string, startTs: number, endTs: number) {
+		const [trace, logs, metrics] = await Promise.all([
+			this.lgtmService.getTrace(traceId),
+			this.lgtmService.getLogs(`{trace_id="${traceId}"}`, startTs, endTs),
+			this.lgtmService.getMetrics(`sum(rate(http_requests_total[1m]))`, startTs, endTs),
+		]);
+
+		return {
+			incidentId,
+			trace,
+			logs,
+			metrics,
+		};
+	}
 
 	async findTier2Clusters(
 		startTs: number,

@@ -7,3 +7,4 @@ export * from "./schema-service";
 export * from "./tier2-queue-service";
 export * from "./tier2-service";
 export * from "./tier1-sync-service";
+export * from "./lgtm-service";

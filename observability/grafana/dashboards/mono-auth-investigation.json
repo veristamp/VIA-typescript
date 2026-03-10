@@ -1,0 +1,368 @@
+{
+	"id": null,
+	"uid": "mono-auth-investigation",
+	"title": "Mono Auth Investigation",
+	"tags": ["mono-auth", "investigation", "slo"],
+	"timezone": "browser",
+	"schemaVersion": 39,
+	"version": 1,
+	"links": [
+		{
+			"asDropdown": false,
+			"icon": "dashboard",
+			"includeVars": true,
+			"keepTime": true,
+			"tags": [],
+			"targetBlank": false,
+			"title": "Tracing Dashboard",
+			"tooltip": "Open the trace search and trace-to-logs correlation dashboard",
+			"type": "dashboards",
+			"uid": "mono-auth-traces"
+		}
+	],
+	"refresh": "15s",
+	"time": {
+		"from": "now-6h",
+		"to": "now"
+	},
+	"templating": {
+		"list": [
+			{
+				"name": "job",
+				"type": "query",
+				"datasource": { "type": "prometheus", "uid": "prometheus" },
+				"query": "label_values(up{app=\"mono-auth\"}, job)",
+				"current": {
+					"selected": true,
+					"text": "mono-auth-app",
+					"value": "mono-auth-app"
+				},
+				"includeAll": false,
+				"multi": false,
+				"refresh": 1
+			}
+		]
+	},
+	"panels": [
+		{
+			"type": "stat",
+			"title": "Availability Burn (5m)",
+			"gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "slo:availability:error_budget_burn_rate5m{job=\"$job\"}",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "none",
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{ "color": "green", "value": null },
+							{ "color": "yellow", "value": 1 },
+							{ "color": "red", "value": 6 }
+						]
+					}
+				},
+				"overrides": []
+			},
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "HTTP Latency Burn (5m)",
+			"gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "slo:latency:error_budget_burn_rate5m{job=\"$job\"}",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "none",
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{ "color": "green", "value": null },
+							{ "color": "yellow", "value": 1 },
+							{ "color": "red", "value": 6 }
+						]
+					}
+				},
+				"overrides": []
+			},
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Sign-in Success Burn (5m)",
+			"gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "slo:auth_signin_success:error_budget_burn_rate5m{job=\"$job\"}",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "none",
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{ "color": "green", "value": null },
+							{ "color": "yellow", "value": 1 },
+							{ "color": "red", "value": 6 }
+						]
+					}
+				},
+				"overrides": []
+			},
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Sign-in Latency Burn (5m)",
+			"gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "slo:auth_signin_latency:error_budget_burn_rate5m{job=\"$job\"}",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "none",
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{ "color": "green", "value": null },
+							{ "color": "yellow", "value": 1 },
+							{ "color": "red", "value": 6 }
+						]
+					}
+				},
+				"overrides": []
+			},
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "timeseries",
+			"title": "SLO Burn Rates (5m vs 1h)",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "slo:availability:error_budget_burn_rate5m{job=\"$job\"}",
+					"legendFormat": "availability 5m",
+					"refId": "A"
+				},
+				{
+					"expr": "slo:availability:error_budget_burn_rate1h{job=\"$job\"}",
+					"legendFormat": "availability 1h",
+					"refId": "B"
+				},
+				{
+					"expr": "slo:latency:error_budget_burn_rate5m{job=\"$job\"}",
+					"legendFormat": "http latency 5m",
+					"refId": "C"
+				},
+				{
+					"expr": "slo:latency:error_budget_burn_rate1h{job=\"$job\"}",
+					"legendFormat": "http latency 1h",
+					"refId": "D"
+				},
+				{
+					"expr": "slo:auth_signin_success:error_budget_burn_rate5m{job=\"$job\"}",
+					"legendFormat": "signin success 5m",
+					"refId": "E"
+				},
+				{
+					"expr": "slo:auth_signin_success:error_budget_burn_rate1h{job=\"$job\"}",
+					"legendFormat": "signin success 1h",
+					"refId": "F"
+				},
+				{
+					"expr": "slo:auth_signin_latency:error_budget_burn_rate5m{job=\"$job\"}",
+					"legendFormat": "signin latency 5m",
+					"refId": "G"
+				},
+				{
+					"expr": "slo:auth_signin_latency:error_budget_burn_rate1h{job=\"$job\"}",
+					"legendFormat": "signin latency 1h",
+					"refId": "H"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "HTTP Request/Error Surface",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum(rate(http_requests_total{job=\"$job\"}[5m]))",
+					"legendFormat": "req/s",
+					"refId": "A"
+				},
+				{
+					"expr": "100 * ((sum(rate(http_requests_total{job=\"$job\",status=\"5xx\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"$job\"}[5m])), 0.001))",
+					"legendFormat": "5xx %",
+					"refId": "B"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Auth Failures by Endpoint/Error Type",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (endpoint, error_type) (rate(auth_failures_total{job=\"$job\"}[5m]))",
+					"legendFormat": "{{endpoint}}/{{error_type}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Sign-in Attempts and Success Rate",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (success, method) (rate(login_attempts_total{job=\"$job\"}[5m]))",
+					"legendFormat": "rate success={{success}} method={{method}}",
+					"refId": "A"
+				},
+				{
+					"expr": "100 * ((sum(rate(login_attempts_total{job=\"$job\",success=\"true\"}[5m])) or vector(0)) / clamp_min(sum(rate(login_attempts_total{job=\"$job\"}[5m])), 0.001))",
+					"legendFormat": "success %",
+					"refId": "B"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Password Queue Wait p95/p99 (ms)",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(semaphore_queue_wait_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p95",
+					"refId": "A"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(semaphore_queue_wait_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p99",
+					"refId": "B"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+		},
+		{
+			"type": "timeseries",
+			"title": "DB Contention and Pool Saturation",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "avg_over_time(db_in_flight_queries{job=\"$job\"}[5m])",
+					"legendFormat": "db in-flight",
+					"refId": "A"
+				},
+				{
+					"expr": "100 * (avg_over_time(db_pool_connections_active{job=\"$job\"}[5m]) / clamp_min(avg_over_time(db_pool_connections_max{job=\"$job\"}[5m]), 1))",
+					"legendFormat": "pool saturation %",
+					"refId": "B"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(db_query_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "db p95 ms",
+					"refId": "C"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "MCP Token Verification Failure Quality",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "(100 * (sum(rate(mcp_token_verifications_total{job=\"$job\",valid=\"false\"}[10m])) / clamp_min(sum(rate(mcp_token_verifications_total{job=\"$job\"}[10m])), 0.001))) or on() vector(0)",
+					"legendFormat": "failure ratio %",
+					"refId": "A"
+				},
+				{
+					"expr": "sum by (reason) (rate(mcp_token_verifications_total{job=\"$job\",valid=\"false\"}[10m]))",
+					"legendFormat": "reason={{reason}}",
+					"refId": "B"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Auth Handler Latency p95 by Endpoint",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le, endpoint) (rate(auth_handler_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "{{endpoint}}",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+		},
+		{
+			"type": "timeseries",
+			"title": "500 Error Distribution by Code (from Logs)",
+			"gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
+			"datasource": { "type": "loki", "uid": "loki" },
+			"targets": [
+				{
+					"expr": "sum by (errorCode) (count_over_time({app=\"mono-auth\",service=~\"mono-auth-app.*\"} | json | httpStatusCode >= 500 [5m]))",
+					"legendFormat": "{{errorCode}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "logs",
+			"title": "Recent Error Logs (Trace-Linked)",
+			"gridPos": { "h": 10, "w": 24, "x": 0, "y": 45 },
+			"datasource": { "type": "loki", "uid": "loki" },
+			"targets": [
+				{
+					"expr": "{app=\"mono-auth\",service=~\"mono-auth-app.*\"} |= \"error\"",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"showLabels": true,
+				"showTime": true,
+				"wrapLogMessage": true,
+				"enableLogDetails": true,
+				"prettifyLogMessage": true,
+				"sortOrder": "Descending"
+			}
+		}
+	]
+}

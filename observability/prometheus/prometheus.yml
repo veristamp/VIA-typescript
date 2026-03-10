@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: mono-auth
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - /etc/prometheus/recording.yml
+  - /etc/prometheus/rules.yml
+  - /etc/prometheus/slos.yml
+
+scrape_configs:
+  - job_name: mono-auth-app
+    scheme: http
+    metrics_path: /metrics
+    bearer_token_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ['mono-auth-app:8787']
+        labels:
+          app: mono-auth
+          env: production
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['prometheus:9090']

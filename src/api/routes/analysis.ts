@@ -152,6 +152,28 @@ app.get("/incidents/:incidentId", async (c) => {
 	return c.json(result);
 });
 
+app.post("/incidents/:incidentId/enrich", async (c) => {
+	const forensicAnalysisService = c.get(
+		"forensicAnalysisService",
+	) as ForensicAnalysisService;
+	const incidentId = c.req.param("incidentId");
+	const body = await c.req.json().catch(() => ({}));
+	const { trace_id, start_ts, end_ts } = body;
+
+	if (!incidentId || !trace_id || !start_ts || !end_ts) {
+		return c.json({ error: "incidentId, trace_id, start_ts, and end_ts are required" }, 400);
+	}
+
+	const enrichment = await forensicAnalysisService.enrichIncident(
+		incidentId,
+		trace_id,
+		start_ts,
+		end_ts,
+	);
+
+	return c.json(enrichment);
+});
+
 app.get("/pipeline/stats", (c) => {
 	const queue = c.get("tier2QueueService") as Tier2QueueService;
 	return c.json({ queue: queue.getStats() });

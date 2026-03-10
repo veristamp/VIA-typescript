@@ -11,6 +11,7 @@ import {
 	ControlService,
 	ForensicAnalysisService,
 	IncidentService,
+	LGTMService,
 	PolicyCompilerService,
 	QdrantService,
 	SchemaService,
@@ -22,10 +23,11 @@ import { logger } from "./utils/logger";
 
 // Initialize services
 const qdrantService = new QdrantService();
+const lgtmService = new LGTMService();
 const schemaService = new SchemaService();
 const policyCompilerService = new PolicyCompilerService();
 const controlService = new ControlService(policyCompilerService);
-const forensicAnalysisService = new ForensicAnalysisService(qdrantService);
+const forensicAnalysisService = new ForensicAnalysisService(qdrantService, lgtmService);
 const incidentService = new IncidentService();
 const evaluationService = new EvaluationService();
 const tier2Service = new Tier2Service(
@@ -34,6 +36,18 @@ const tier2Service = new Tier2Service(
 	incidentService,
 );
 const tier2QueueService = new Tier2QueueService(tier2Service);
+
+declare module "hono" {
+	interface ContextVariableMap {
+		schemaService: SchemaService;
+		controlService: ControlService;
+		forensicAnalysisService: ForensicAnalysisService;
+		incidentService: IncidentService;
+		evaluationService: EvaluationService;
+		tier2QueueService: Tier2QueueService;
+		lgtmService: LGTMService;
+	}
+}
 
 const app = new Hono();
 
@@ -52,6 +66,7 @@ app.use("*", async (c, next) => {
 	c.set("incidentService", incidentService);
 	c.set("evaluationService", evaluationService);
 	c.set("tier2QueueService", tier2QueueService);
+	c.set("lgtmService", lgtmService);
 	await next();
 });
 

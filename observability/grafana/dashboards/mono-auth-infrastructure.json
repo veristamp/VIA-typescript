@@ -1,0 +1,147 @@
+{
+	"id": null,
+	"uid": "mono-auth-infrastructure",
+	"title": "Mono Auth Infrastructure",
+	"tags": ["mono-auth", "infra"],
+	"timezone": "browser",
+	"schemaVersion": 39,
+	"version": 1,
+	"refresh": "15s",
+	"time": {
+		"from": "now-6h",
+		"to": "now"
+	},
+	"templating": {
+		"list": [
+			{
+				"name": "job",
+				"type": "query",
+				"datasource": { "type": "prometheus", "uid": "prometheus" },
+				"query": "label_values(up{app=\"mono-auth\"}, job)",
+				"current": {
+					"selected": true,
+					"text": "mono-auth-app",
+					"value": "mono-auth-app"
+				},
+				"includeAll": false,
+				"multi": false,
+				"refresh": 1
+			}
+		]
+	},
+	"panels": [
+		{
+			"type": "stat",
+			"title": "HTTP In-Flight Requests",
+			"gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum(http_server_active_requests{job=\"$job\"})",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Rate Limit Hits / sec",
+			"gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum(rate(rate_limit_hits_total{job=\"$job\"}[5m])) or vector(0)",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Uptime (hours)",
+			"gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{ "expr": "max(uptime_seconds{job=\"$job\"}) / 3600", "refId": "A" }
+			],
+			"fieldConfig": { "defaults": { "unit": "h" }, "overrides": [] },
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+			}
+		},
+		{
+			"type": "timeseries",
+			"title": "Node.js Event Loop Lag p99 (ms)",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "1000 * max(nodejs_nodejs_eventloop_lag_p99_seconds{job=\"$job\"})",
+					"legendFormat": "eventloop_lag_p99",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+		},
+		{
+			"type": "timeseries",
+			"title": "Node.js Heap Usage (bytes)",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "nodejs_nodejs_heap_size_used_bytes{job=\"$job\"}",
+					"legendFormat": "used",
+					"refId": "A"
+				},
+				{
+					"expr": "nodejs_nodejs_heap_size_total_bytes{job=\"$job\"}",
+					"legendFormat": "total",
+					"refId": "B"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Audit Queue Length and Latency",
+			"gridPos": { "h": 10, "w": 24, "x": 0, "y": 21 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (storage) (audit_queue_length{job=\"$job\"})",
+					"legendFormat": "pending entries ({{storage}})",
+					"refId": "A"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(audit_queue_wait_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p95 wait ms",
+					"refId": "B"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(audit_queue_wait_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p99 wait ms",
+					"refId": "C"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"custom": { "drawStyle": "line" },
+					"unit": "ms"
+				},
+				"overrides": [
+					{
+						"matcher": { "id": "byRegexp", "options": "pending entries.*" },
+						"properties": [
+							{ "id": "custom.drawStyle", "value": "bars" },
+							{ "id": "unit", "value": "none" }
+						]
+					}
+				]
+			}
+		}
+	]
+}

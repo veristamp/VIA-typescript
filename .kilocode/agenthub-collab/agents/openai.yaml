@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentHub Collab"
+  short_description: "Coordinate agents over AgentHub"
+  default_prompt: "Use $agenthub-collab to collaborate through AgentHub using the ah CLI."

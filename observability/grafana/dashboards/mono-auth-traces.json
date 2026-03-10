@@ -1,0 +1,419 @@
+{
+	"annotations": {
+		"list": [
+			{
+				"builtIn": 1,
+				"datasource": {
+					"type": "grafana",
+					"uid": "grafana"
+				},
+				"enable": true,
+				"hide": true,
+				"iconColor": "rgba(0, 211, 255, 1)",
+				"name": "Annotations & Alerts",
+				"type": "dashboard"
+			}
+		]
+	},
+	"editable": true,
+	"fiscalYearStartMonth": 0,
+	"graphTooltip": 0,
+	"id": null,
+	"links": [
+		{
+			"asDropdown": false,
+			"icon": "dashboard",
+			"includeVars": true,
+			"keepTime": true,
+			"tags": [],
+			"targetBlank": false,
+			"title": "Investigation Dashboard",
+			"tooltip": "Open the broader SLO and incident investigation dashboard",
+			"type": "dashboards",
+			"uid": "mono-auth-investigation"
+		},
+		{
+			"asDropdown": false,
+			"icon": "external link",
+			"includeVars": true,
+			"keepTime": true,
+			"tags": [],
+			"targetBlank": true,
+			"title": "Pyroscope Profiling",
+			"tooltip": "View CPU and memory profiles",
+			"type": "link",
+			"url": "http://localhost:4040"
+		}
+	],
+	"panels": [
+		{
+			"datasource": {
+				"type": "tempo",
+				"uid": "tempo"
+			},
+			"description": "Stable trace search table backed by Tempo. Click a Trace ID to open the trace detail view.",
+			"fieldConfig": {
+				"defaults": {
+					"custom": {}
+				},
+				"overrides": []
+			},
+			"gridPos": {
+				"h": 12,
+				"w": 24,
+				"x": 0,
+				"y": 0
+			},
+			"id": 1,
+			"options": {
+				"cellHeight": "sm",
+				"footer": {
+					"countRows": false,
+					"enablePagination": true,
+					"fields": "",
+					"reducer": ["sum"],
+					"show": false
+				},
+				"showHeader": true
+			},
+			"targets": [
+				{
+					"datasource": {
+						"type": "tempo",
+						"uid": "tempo"
+					},
+					"queryType": "traceql",
+					"query": "{resource.service.name=\"mono-auth\"}",
+					"refId": "A"
+				}
+			],
+			"title": "Recent Traces (mono-auth)",
+			"type": "table"
+		},
+		{
+			"datasource": {
+				"type": "tempo",
+				"uid": "tempo"
+			},
+			"fieldConfig": {
+				"defaults": {
+					"color": {
+						"mode": "palette-classic"
+					},
+					"custom": {
+						"axisCenteredZero": false,
+						"axisColorMode": "text",
+						"axisLabel": "",
+						"axisPlacement": "auto",
+						"barAlignment": 0,
+						"drawStyle": "line",
+						"fillOpacity": 10,
+						"gradientMode": "none",
+						"hideFrom": {
+							"legend": false,
+							"tooltip": false,
+							"viz": false
+						},
+						"lineInterpolation": "linear",
+						"lineWidth": 1,
+						"pointSize": 5,
+						"scaleDistribution": {
+							"type": "linear"
+						},
+						"showPoints": "never",
+						"spanNulls": false,
+						"stacking": {
+							"group": "A",
+							"mode": "none"
+						},
+						"thresholdsStyle": {
+							"mode": "off"
+						}
+					},
+					"mappings": [],
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{
+								"color": "green",
+								"value": null
+							}
+						]
+					},
+					"unit": "s"
+				},
+				"overrides": []
+			},
+			"gridPos": {
+				"h": 8,
+				"w": 12,
+				"x": 0,
+				"y": 12
+			},
+			"id": 3,
+			"options": {
+				"legend": {
+					"calcs": ["mean", "max"],
+					"displayMode": "table",
+					"placement": "bottom",
+					"showLegend": true
+				},
+				"tooltip": {
+					"mode": "multi",
+					"sort": "none"
+				}
+			},
+			"targets": [
+				{
+					"datasource": {
+						"type": "prometheus",
+						"uid": "prometheus"
+					},
+					"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{app=\"mono-auth\"}[5m])) by (le))",
+					"legendFormat": "p99 latency",
+					"refId": "A"
+				},
+				{
+					"datasource": {
+						"type": "prometheus",
+						"uid": "prometheus"
+					},
+					"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app=\"mono-auth\"}[5m])) by (le))",
+					"legendFormat": "p95 latency",
+					"refId": "B"
+				}
+			],
+			"title": "Request Latency (p95/p99)",
+			"type": "timeseries"
+		},
+		{
+			"datasource": {
+				"type": "tempo",
+				"uid": "tempo"
+			},
+			"fieldConfig": {
+				"defaults": {
+					"color": {
+						"mode": "thresholds"
+					},
+					"mappings": [],
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{
+								"color": "green",
+								"value": null
+							},
+							{
+								"color": "yellow",
+								"value": 100
+							},
+							{
+								"color": "red",
+								"value": 500
+							}
+						]
+					},
+					"unit": "reqps"
+				},
+				"overrides": []
+			},
+			"gridPos": {
+				"h": 8,
+				"w": 6,
+				"x": 12,
+				"y": 12
+			},
+			"id": 4,
+			"options": {
+				"colorMode": "value",
+				"graphMode": "area",
+				"justifyMode": "auto",
+				"orientation": "auto",
+				"reduceOptions": {
+					"calcs": ["lastNotNull"],
+					"fields": "",
+					"values": false
+				},
+				"textMode": "auto"
+			},
+			"pluginVersion": "11.0.0",
+			"targets": [
+				{
+					"datasource": {
+						"type": "prometheus",
+						"uid": "prometheus"
+					},
+					"expr": "sum(rate(http_requests_total{app=\"mono-auth\"}[5m]))",
+					"refId": "A"
+				}
+			],
+			"title": "Request Rate",
+			"type": "stat"
+		},
+		{
+			"datasource": {
+				"type": "tempo",
+				"uid": "tempo"
+			},
+			"fieldConfig": {
+				"defaults": {
+					"color": {
+						"mode": "thresholds"
+					},
+					"mappings": [],
+					"thresholds": {
+						"mode": "absolute",
+						"steps": [
+							{
+								"color": "green",
+								"value": null
+							},
+							{
+								"color": "red",
+								"value": 1
+							}
+						]
+					},
+					"unit": "percentunit"
+				},
+				"overrides": []
+			},
+			"gridPos": {
+				"h": 8,
+				"w": 6,
+				"x": 18,
+				"y": 12
+			},
+			"id": 5,
+			"options": {
+				"colorMode": "value",
+				"graphMode": "area",
+				"justifyMode": "auto",
+				"orientation": "auto",
+				"reduceOptions": {
+					"calcs": ["lastNotNull"],
+					"fields": "",
+					"values": false
+				},
+				"textMode": "auto"
+			},
+			"pluginVersion": "11.0.0",
+			"targets": [
+				{
+					"datasource": {
+						"type": "prometheus",
+						"uid": "prometheus"
+					},
+					"expr": "sum(rate(http_requests_total{app=\"mono-auth\",status=\"5xx\"}[5m])) / clamp_min(sum(rate(http_requests_total{app=\"mono-auth\"}[5m])), 0.001)",
+					"refId": "A"
+				}
+			],
+			"title": "Error Rate",
+			"type": "stat"
+		},
+		{
+			"datasource": {
+				"type": "loki",
+				"uid": "loki"
+			},
+			"gridPos": {
+				"h": 12,
+				"w": 24,
+				"x": 0,
+				"y": 20
+			},
+			"id": 2,
+			"options": {
+				"dedupStrategy": "none",
+				"enableLogDetails": true,
+				"prettifyLogMessage": true,
+				"showCommonLabels": false,
+				"showLabels": false,
+				"showTime": true,
+				"sortOrder": "Descending",
+				"wrapLogMessage": true
+			},
+			"targets": [
+				{
+					"datasource": {
+						"type": "loki",
+						"uid": "loki"
+					},
+					"expr": "{app=\"mono-auth\"} |~ \"${traceId}\" | json | line_format \"{{.body}}\"",
+					"refId": "A"
+				}
+			],
+			"title": "Logs for Trace",
+			"type": "logs"
+		},
+		{
+			"datasource": {
+				"type": "tempo",
+				"uid": "tempo"
+			},
+			"description": "Recent server error traces from Tempo. Click a Trace ID to inspect the trace.",
+			"gridPos": {
+				"h": 10,
+				"w": 24,
+				"x": 0,
+				"y": 32
+			},
+			"id": 6,
+			"options": {
+				"cellHeight": "sm",
+				"footer": {
+					"countRows": false,
+					"enablePagination": true,
+					"fields": "",
+					"reducer": ["sum"],
+					"show": false
+				},
+				"showHeader": true
+			},
+			"targets": [
+				{
+					"datasource": {
+						"type": "tempo",
+						"uid": "tempo"
+					},
+					"queryType": "traceql",
+					"query": "{resource.service.name=\"mono-auth\" && span.http.response.status_code >= 500}",
+					"refId": "A"
+				}
+			],
+			"title": "Error Traces (5xx)",
+			"type": "table"
+		}
+	],
+	"refresh": "15s",
+	"schemaVersion": 39,
+	"tags": ["mono-auth", "tracing", "performance"],
+	"templating": {
+		"list": [
+			{
+				"current": {
+					"selected": true,
+					"text": ".*",
+					"value": ".*"
+				},
+				"hide": 0,
+				"label": "Trace ID Regex",
+				"name": "traceId",
+				"options": [],
+				"query": "",
+				"skipUrlSync": false,
+				"type": "textbox"
+			}
+		]
+	},
+	"time": {
+		"from": "now-1h",
+		"to": "now"
+	},
+	"timepicker": {},
+	"timezone": "browser",
+	"title": "Mono Auth Tracing & Correlation",
+	"uid": "mono-auth-traces",
+	"version": 2
+}

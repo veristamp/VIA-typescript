@@ -16,15 +16,17 @@
     "format": "biome format --write src/"
   },
   "dependencies": {
-    "hono": "latest",
-    "drizzle-orm": "latest",
-    "drizzle-kit": "latest",
-    "pg": "latest",
     "@qdrant/js-client-rest": "latest",
-    "zod": "latest",
+    "@tanstack/react-query": "^5.90.21",
+    "drizzle-kit": "latest",
+    "drizzle-orm": "latest",
+    "hono": "^4.12.7",
     "json5": "latest",
     "jsonl": "latest",
-    "winston": "latest"
+    "lucide-react": "^0.577.0",
+    "pg": "latest",
+    "winston": "latest",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/pg": "latest",

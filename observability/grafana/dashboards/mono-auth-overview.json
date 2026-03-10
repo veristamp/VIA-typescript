@@ -1,0 +1,199 @@
+{
+	"id": null,
+	"uid": "mono-auth-overview",
+	"title": "Mono Auth Overview",
+	"tags": ["mono-auth", "production"],
+	"timezone": "browser",
+	"schemaVersion": 39,
+	"version": 1,
+	"refresh": "15s",
+	"time": {
+		"from": "now-1h",
+		"to": "now"
+	},
+	"templating": {
+		"list": [
+			{
+				"name": "job",
+				"type": "query",
+				"datasource": { "type": "prometheus", "uid": "prometheus" },
+				"query": "label_values(up{app=\"mono-auth\"}, job)",
+				"current": {
+					"selected": true,
+					"text": "mono-auth-app",
+					"value": "mono-auth-app"
+				},
+				"includeAll": false,
+				"multi": false,
+				"refresh": 1
+			}
+		]
+	},
+	"panels": [
+		{
+			"type": "stat",
+			"title": "Request Rate (req/s)",
+			"gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum(rate(http_requests_total{job=\"$job\"}[5m]))",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+				"orientation": "auto",
+				"textMode": "auto"
+			}
+		},
+		{
+			"type": "stat",
+			"title": "5xx Error %",
+			"gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "100 * ((sum(rate(http_requests_total{job=\"$job\",status=\"5xx\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{job=\"$job\"}[5m])),0.001))",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+				"orientation": "auto",
+				"textMode": "auto"
+			}
+		},
+		{
+			"type": "stat",
+			"title": "p95 Latency (ms)",
+			"gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"refId": "A"
+				}
+			],
+			"fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+				"orientation": "auto",
+				"textMode": "auto"
+			}
+		},
+		{
+			"type": "stat",
+			"title": "Auth Failures (5m)",
+			"gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum(increase(auth_failures_total{job=\"$job\"}[5m])) or vector(0)",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+				"orientation": "auto",
+				"textMode": "auto"
+			}
+		},
+		{
+			"type": "timeseries",
+			"title": "HTTP Request Rate by Status",
+			"gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (status) (rate(http_requests_total{job=\"$job\"}[5m]))",
+					"legendFormat": "{{status}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Latency p50/p95/p99 (ms)",
+			"gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "1000 * histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p50",
+					"refId": "A"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p95",
+					"refId": "B"
+				},
+				{
+					"expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"$job\"}[5m])))",
+					"legendFormat": "p99",
+					"refId": "C"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Login Attempts",
+			"gridPos": { "h": 8, "w": 8, "x": 0, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (success) (rate(login_attempts_total{job=\"$job\"}[5m]))",
+					"legendFormat": "success={{success}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Cache Ops",
+			"gridPos": { "h": 8, "w": 8, "x": 8, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (op, result) (rate(cache_ops_total{job=\"$job\"}[5m]))",
+					"legendFormat": "{{op}}/{{result}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "timeseries",
+			"title": "Audit Log Writes",
+			"gridPos": { "h": 8, "w": 8, "x": 16, "y": 13 },
+			"datasource": { "type": "prometheus", "uid": "prometheus" },
+			"targets": [
+				{
+					"expr": "sum by (action) (rate(audit_logs_total{job=\"$job\"}[5m]))",
+					"legendFormat": "{{action}}",
+					"refId": "A"
+				}
+			]
+		},
+		{
+			"type": "logs",
+			"title": "Recent Application Logs",
+			"gridPos": { "h": 10, "w": 24, "x": 0, "y": 21 },
+			"datasource": { "type": "loki", "uid": "loki" },
+			"targets": [
+				{
+					"expr": "{app=\"mono-auth\",service=~\"mono-auth-app|mono-auth-vector|mono-auth-prometheus|mono-auth-loki\"}",
+					"refId": "A"
+				}
+			],
+			"options": {
+				"showLabels": true,
+				"showTime": true,
+				"wrapLogMessage": true,
+				"enableLogDetails": true,
+				"prettifyLogMessage": true,
+				"sortOrder": "Descending"
+			}
+		}
+	]
+}

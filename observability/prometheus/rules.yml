@@ -1,0 +1,221 @@
+groups:
+  - name: mono-auth-service-alerts
+    interval: 30s
+    rules:
+      - alert: MonoAuthAppDown
+        expr: up{job="mono-auth-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: mono-auth-app
+        annotations:
+          summary: "mono-auth app is down"
+          description: "Prometheus cannot scrape mono-auth-app for more than 1 minute."
+
+      - alert: MonoAuthHigh5xxRate
+        expr: mono_auth:http:5xx_ratio5m{job="mono-auth-app"} > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High 5xx ratio on mono-auth"
+          description: "5xx error ratio has been above 5% for 5 minutes."
+
+      - alert: MonoAuthHighP95Latency
+        expr: mono_auth:http:latency_p95_seconds5m{job="mono-auth-app"} > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High p95 latency on mono-auth"
+          description: "p95 HTTP latency has been above 1s for 10 minutes."
+
+      - alert: MonoAuthHighSignInP99Latency
+        expr: mono_auth:auth:signin_latency_p99_seconds5m{job="mono-auth-app"} > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High sign-in p99 latency"
+          description: "p99 sign-in latency has been above 1.5s for 10 minutes."
+
+      - alert: MonoAuthAuthFailureSpike
+        expr: mono_auth:auth:failures_increase10m{job="mono-auth-app"} > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Authentication failure spike"
+          description: "Auth failures exceeded 100 in the last 10 minutes."
+
+  - name: mono-auth-database-alerts
+    interval: 30s
+    rules:
+      - alert: MonoAuthHighDBP95Latency
+        expr: mono_auth:db:latency_p95_seconds5m{job="mono-auth-app"} > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High DB p95 latency"
+          description: "db_query_duration_seconds p95 has been above 100ms for 10 minutes."
+
+      - alert: MonoAuthHighDBConcurrency
+        expr: mono_auth:db:in_flight_avg5m{job="mono-auth-app"} > 20
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High DB query concurrency"
+          description: "Average in-flight DB queries has remained above 20 for 10 minutes."
+
+  - name: mono-auth-cache-alerts
+    interval: 30s
+    rules:
+      - alert: MonoAuthLowCacheHitRate
+        expr: mono_auth:cache:get_hit_ratio10m{job="mono-auth-app"} < 0.80
+        for: 15m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Cache hit rate dropped"
+          description: "Cache GET hit rate has been below 80% for 15 minutes."
+
+  - name: mono-auth-security-alerts
+    interval: 30s
+    rules:
+      - alert: MonoAuthRateLimitSpike
+        expr: mono_auth:rate_limit:hits_rate5m{job="mono-auth-app"} > 20
+        for: 5m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Rate limit hit spike"
+          description: "Rate-limit rejections exceeded 20/sec for 5 minutes."
+
+      - alert: MonoAuthMcpTokenVerificationFailureRatioHigh
+        expr: mono_auth:mcp:token_verification_failure_ratio10m{job="mono-auth-app"} > 0.20
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "High MCP token verification failure ratio"
+          description: "More than 20% of MCP token verifications have failed for 10 minutes."
+
+      - alert: MonoAuthPasswordQueueWaitHighP95
+        expr: mono_auth:auth:password_queue_wait_p95_seconds5m{job="mono-auth-app"} > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Password queue wait p95 is high"
+          description: "Password semaphore queue wait p95 has been above 250ms for 10 minutes."
+
+  - name: mono-auth-slo-alerts
+    interval: 30s
+    rules:
+      - alert: MonoAuthAvailabilityErrorBudgetBurnFast
+        expr: |
+          slo:availability:error_budget_burn_rate5m{job="mono-auth-app"} > 14.4
+          and on() slo:http:request_rate5m{job="mono-auth-app"} > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: mono-auth-app
+        annotations:
+          summary: "Availability error budget burn is critical"
+          description: "5m availability burn rate exceeds 14.4x budget."
+
+      - alert: MonoAuthAvailabilityErrorBudgetBurnSlow
+        expr: |
+          slo:availability:error_budget_burn_rate1h{job="mono-auth-app"} > 6
+          and on() slo:http:request_rate1h{job="mono-auth-app"} > 0.1
+        for: 30m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Availability error budget burn is elevated"
+          description: "1h availability burn rate exceeds 6x budget."
+
+      - alert: MonoAuthLatencyErrorBudgetBurnFast
+        expr: |
+          slo:latency:error_budget_burn_rate5m{job="mono-auth-app"} > 14.4
+          and on() slo:http:request_rate5m{job="mono-auth-app"} > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: mono-auth-app
+        annotations:
+          summary: "HTTP latency error budget burn is critical"
+          description: "5m HTTP latency burn rate exceeds 14.4x budget."
+
+      - alert: MonoAuthLatencyErrorBudgetBurnSlow
+        expr: |
+          slo:latency:error_budget_burn_rate1h{job="mono-auth-app"} > 6
+          and on() slo:http:request_rate1h{job="mono-auth-app"} > 0.1
+        for: 30m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "HTTP latency error budget burn is elevated"
+          description: "1h HTTP latency burn rate exceeds 6x budget."
+
+      - alert: MonoAuthSignInSuccessErrorBudgetBurnFast
+        expr: |
+          slo:auth_signin_success:error_budget_burn_rate5m{job="mono-auth-app"} > 14.4
+          and on() slo:auth_signin:attempt_rate5m{job="mono-auth-app"} > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          service: mono-auth-app
+        annotations:
+          summary: "Sign-in success SLO burn is critical"
+          description: "5m sign-in success burn rate exceeds 14.4x budget."
+
+      - alert: MonoAuthSignInSuccessErrorBudgetBurnSlow
+        expr: |
+          slo:auth_signin_success:error_budget_burn_rate1h{job="mono-auth-app"} > 6
+          and on() slo:auth_signin:attempt_rate1h{job="mono-auth-app"} > 0.02
+        for: 30m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Sign-in success SLO burn is elevated"
+          description: "1h sign-in success burn rate exceeds 6x budget."
+
+      - alert: MonoAuthSignInLatencyErrorBudgetBurnFast
+        expr: |
+          slo:auth_signin_latency:error_budget_burn_rate5m{job="mono-auth-app"} > 14.4
+          and on() slo:auth_signin:attempt_rate5m{job="mono-auth-app"} > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          service: mono-auth-app
+        annotations:
+          summary: "Sign-in latency SLO burn is critical"
+          description: "5m sign-in latency burn rate exceeds 14.4x budget."
+
+      - alert: MonoAuthSignInLatencyErrorBudgetBurnSlow
+        expr: |
+          slo:auth_signin_latency:error_budget_burn_rate1h{job="mono-auth-app"} > 6
+          and on() slo:auth_signin:attempt_rate1h{job="mono-auth-app"} > 0.02
+        for: 30m
+        labels:
+          severity: warning
+          service: mono-auth-app
+        annotations:
+          summary: "Sign-in latency SLO burn is elevated"
+          description: "1h sign-in latency burn rate exceeds 6x budget."
