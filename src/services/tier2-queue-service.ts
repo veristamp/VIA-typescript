@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { settings } from "../config/settings";
 import { tier2DeadLetterRepository } from "../modules/tier2/adapters/registry-repositories";
 import { normalizeTier1Severity } from "../modules/tier2/contracts/tier1-signal";
@@ -23,7 +24,7 @@ export interface QueueStats {
 	inFlight: number;
 }
 
-export class Tier2QueueService {
+export class Tier2QueueService extends EventEmitter {
 	private queue: QueueTask[] = [];
 	private readonly dedupeWindowSec = 900;
 	private readonly dedupeMap = new Map<string, number>();
@@ -45,7 +46,9 @@ export class Tier2QueueService {
 	constructor(
 		private readonly tier2Service: Tier2Service,
 		private readonly deadLetters: Tier2DeadLetterRepository = tier2DeadLetterRepository,
-	) {}
+	) {
+		super();
+	}
 
 	private formatError(error: unknown): string {
 		if (error instanceof Error) {
@@ -113,6 +116,10 @@ export class Tier2QueueService {
 			nextAttemptAt: now,
 			priority: this.resolvePriority(signals),
 		});
+
+		// Broadcast signals for real-time stream
+		this.emit("signals", signals);
+
 		this.dedupeMap.set(eventId, now + this.dedupeWindowSec);
 		this.stats.queued += 1;
 		return { accepted: true, eventId };

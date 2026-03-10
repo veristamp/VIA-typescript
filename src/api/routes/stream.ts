@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { Tier1V1AnomalyBatchSchema } from "../../modules/tier2/contracts/tier1-signal";
 import type { Tier2QueueService } from "../../services/tier2-queue-service";
 import { logger } from "../../utils/logger";
@@ -50,6 +51,34 @@ app.post("/tier2/anomalies", async (c) => {
 	return c.json({
 		status: "accepted",
 		event_id: enqueueResult.eventId,
+	});
+});
+
+app.get("/signals", async (c) => {
+	const queue = c.get("tier2QueueService") as Tier2QueueService;
+
+	return streamSSE(c, async (stream) => {
+		const onSignals = async (signals: any[]) => {
+			await stream.writeSSE({
+				data: JSON.stringify(signals),
+				event: "signals",
+			});
+		};
+
+		queue.on("signals", onSignals);
+
+		// Keep-alive heartbeat
+		const heartbeat = setInterval(async () => {
+			await stream.writeSSE({ data: "ping", event: "ping" });
+		}, 15000);
+
+		stream.onAbort(() => {
+			queue.off("signals", onSignals);
+			clearInterval(heartbeat);
+		});
+
+		// Initial connection message
+		await stream.writeSSE({ data: "connected", event: "info" });
 	});
 });
 

@@ -1,5 +1,6 @@
 import { Activity, ShieldAlert } from "lucide-react";
 import { IncidentGrid } from "./features/incidents/components/IncidentGrid";
+import { SignalTicker } from "./features/stream/SignalTicker";
 import "./App.css";
 
 // LGTM Deep Link Helpers (assuming Grafana is at :3000)
@@ -18,8 +19,13 @@ function App() {
         </div>
       </header>
 
-      <main>
-        <IncidentGrid grafanaUrl={GRAFANA_URL} />
+      <main className="main-layout">
+        <div className="content-left">
+          <IncidentGrid grafanaUrl={GRAFANA_URL} />
+        </div>
+        <aside className="content-right">
+          <SignalTicker />
+        </aside>
       </main>
     </div>
   );
