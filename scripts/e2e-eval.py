@@ -330,8 +330,10 @@ def main():
     )
 
     parser.add_argument("-s", "--scenario", type=str, default="quick",
-                        choices=["quick", "mixed", "mixed_fast", "security", "performance", "throughput"],
+                        choices=["quick", "mixed", "mixed_fast", "adversarial", "chaos", "security", "performance", "throughput"],
                         help="Benchmark scenario (default: quick)")
+    parser.add_argument("--run-all", action="store_true",
+                        help="Run all scenarios sequentially")
     parser.add_argument("-d", "--duration", type=int, default=None,
                         help="Override duration in minutes")
     parser.add_argument("--seed", type=int, default=42,
@@ -344,6 +346,35 @@ def main():
                         help="Output results to JSON file")
 
     args = parser.parse_args()
+
+    if args.run_all:
+        scenarios = ["quick", "mixed_fast", "adversarial", "chaos"]
+        all_results = []
+        for s in scenarios:
+            config = EvalConfig(
+                scenario=s,
+                duration_minutes=args.duration,
+                verbose=args.verbose,
+                tier2_url=args.tier2_url,
+                seed=args.seed
+            )
+            print(f"\n{Colors.BOLD}{Colors.MAGENTA}>>> STARTING SCENARIO: {s}{Colors.END}")
+            res = run_evaluation(config)
+            if res:
+                all_results.append(res)
+            time.sleep(5) # Cooldown between runs
+        
+        # Summary
+        print(f"\n{Colors.BOLD}{Colors.CYAN}=== ALL-SCENARIO AGGREGATED SUMMARY ==={Colors.END}")
+        print(f"{'Scenario':<20} | {'Tier-1 F1':<10} | {'Tier-2 F1':<10} | {'Health'}")
+        print("-" * 60)
+        for r in all_results:
+            name = r.get('config_name', 'N/A')
+            t1_f1 = r.get('detection_f1', 0)
+            t2_f1 = r.get('incident_f1', 0)
+            health = (t1_f1 + t2_f1) / 2
+            print(f"{name[:20]:<20} | {t1_f1:10.4f} | {t2_f1:10.4f} | {health:.4f}")
+        return
 
     config = EvalConfig(
         scenario=args.scenario,

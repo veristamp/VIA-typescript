@@ -85,10 +85,11 @@ pub fn next_trace_and_span_ids<R: Rng + ?Sized>(rng: &mut R) -> (String, String)
 
 // Re-export common scenarios for convenience
 pub use distributed::{
-    CascadeFailure, DDoSAttack, DataExfiltration, ErrorRateSpike, SlowQueries, TrafficSpike,
+    CascadeFailure, DDoSAttack, DataExfiltration, ErrorRateSpike, LowAndSlowExfiltration,
+    SlowQueries, TrafficSpike,
 };
-pub use performance::{CpuSpike, InfiniteLoop, MemoryLeak};
-pub use security::{CredentialStuffing, PortScan, SqlInjection};
+pub use performance::{CpuSpike, InfiniteLoop, MemoryLeak, ZombieProcess};
+pub use security::{APIReconnaissance, CredentialStuffing, PortScan, SqlInjection};
 pub use traffic::NormalTraffic;
 
 /// Create a scenario by name with default parameters
@@ -98,12 +99,14 @@ pub fn create_scenario(name: &str) -> Option<Box<dyn Scenario>> {
         "credential_stuffing" | "brute_force" => {
             Some(Box::new(CredentialStuffing { attack_rps: 50.0 }))
         }
+        "api_recon" => Some(Box::new(APIReconnaissance::new("10.5.5.5", 5.0))),
         "sql_injection" | "sqli" => Some(Box::new(SqlInjection { attack_rps: 10.0 })),
         "port_scan" => Some(Box::new(PortScan {
             source_ip: "192.168.1.100".to_string(),
             scan_speed: 100.0,
         })),
         "memory_leak" => Some(Box::new(MemoryLeak::new("payment-service", 10.0))),
+        "zombie_process" | "zombie" => Some(Box::new(ZombieProcess::new("auth-service", 5.0))),
         "cpu_spike" => Some(Box::new(CpuSpike::new("stream-processor", 0.8))),
         "infinite_loop" | "stack_overflow" => Some(Box::new(InfiniteLoop {
             service_name: "recommendation-engine".to_string(),
@@ -113,6 +116,11 @@ pub fn create_scenario(name: &str) -> Option<Box<dyn Scenario>> {
         "data_exfiltration" | "exfil" => Some(Box::new(DataExfiltration::new(
             5.0,
             "external-collector.evil.com",
+        ))),
+        "low_and_slow_exfiltration" | "low_slow" => Some(Box::new(LowAndSlowExfiltration::new(
+            "external-collector.evil.com",
+            100.0,
+            0.05,
         ))),
         "slow_queries" => Some(Box::new(SlowQueries::new("inventory-service", 5.0, 10.0))),
         "error_spike" => Some(Box::new(ErrorRateSpike::new("payment-service", 0.5, 50.0))),
@@ -143,6 +151,10 @@ pub fn list_scenarios() -> Vec<(&'static str, &'static str)> {
             "Service failure propagating through dependencies",
         ),
         ("data_exfiltration", "Suspicious large data transfers"),
+        (
+            "low_and_slow_exfiltration",
+            "Stealthy data exfiltration hiding in normal traffic",
+        ),
         ("slow_queries", "Database performance degradation"),
         ("error_spike", "Sudden increase in error rates"),
         ("traffic_spike", "Sudden traffic burst"),

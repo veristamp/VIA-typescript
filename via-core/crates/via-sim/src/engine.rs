@@ -341,6 +341,7 @@ impl SimulationEngine {
 
         // Generate logs from active scheduled scenarios
         let mut completed_indices: Vec<usize> = Vec::new();
+        let mut tick_anomaly_log_count = 0u64;
         for (i, scheduled) in self.scheduled.iter_mut().enumerate() {
             if scheduled.activated && current < scheduled.end_time_ns {
                 let mut logs = scheduled.scenario.tick(current, delta_ns);
@@ -349,6 +350,7 @@ impl SimulationEngine {
                 for log in &mut logs {
                     log.mark_anomalous(scheduled.anomaly_id.clone());
                     self.ground_truth.record_log(&scheduled.anomaly_id);
+                    tick_anomaly_log_count += 1;
                 }
 
                 active_scenarios.push(format!("{}(anomaly)", scheduled.scenario.name()));
@@ -371,11 +373,8 @@ impl SimulationEngine {
         self.current_time_ns = end_time;
         self.stats.tick_count += 1;
 
-        // Count anomaly logs
-        let anomaly_log_count = all_logs.iter().filter(|l| l.isGroundTruthAnomaly).count() as u64;
-
         self.stats.total_logs += all_logs.len() as u64;
-        self.stats.total_anomaly_logs += anomaly_log_count;
+        self.stats.total_anomaly_logs += tick_anomaly_log_count;
 
         // Build output
         SimulationBatch {
@@ -392,7 +391,7 @@ impl SimulationEngine {
                 timestamp_ns: self.current_time_ns,
                 elapsed_ns: self.current_time_ns - self.start_time_ns,
                 log_count: self.stats.total_logs,
-                anomaly_log_count,
+                anomaly_log_count: tick_anomaly_log_count,
                 active_scenarios,
             },
         }

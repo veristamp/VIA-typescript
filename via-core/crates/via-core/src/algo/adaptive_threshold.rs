@@ -111,6 +111,14 @@ impl AdaptiveThreshold {
 
     /// Update with new value and return current threshold
     pub fn update(&mut self, value: f64) -> f64 {
+        self.update_with_gate(value, true)
+    }
+
+    pub fn update_with_gate(&mut self, value: f64, should_update: bool) -> f64 {
+        if !should_update {
+            return self.current_threshold;
+        }
+
         self.update_count += 1;
 
         // Update EWMA statistics
@@ -304,9 +312,9 @@ pub mod presets {
         AdaptiveThreshold::ewma_sigma(50, 2.0)
     }
 
-    /// For distribution/latency detection (conservative, 3-sigma)
+    /// For distribution/latency detection (conservative, 4-sigma)
     pub fn distribution_threshold() -> AdaptiveThreshold {
-        AdaptiveThreshold::ewma_sigma(50, 3.0)
+        AdaptiveThreshold::ewma_sigma(50, 4.0)
     }
 
     /// For cardinality detection (percentile-based, 95th)

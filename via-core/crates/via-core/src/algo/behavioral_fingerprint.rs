@@ -77,7 +77,7 @@ impl BehavioralProfile {
             behavior_score: 0.0,
             anomaly_count: 0,
             is_mature: false,
-            maturity_threshold: 50,
+            maturity_threshold: 100,
         }
     }
 
@@ -382,7 +382,7 @@ pub struct BehavioralFingerprintDetector {
 impl BehavioralFingerprintDetector {
     pub fn new(max_profiles: usize) -> Self {
         Self {
-            store: ProfileStore::new(max_profiles, 30),
+            store: ProfileStore::new(max_profiles, 100),
             last_timestamp: 0,
             last_entity: 0,
         }

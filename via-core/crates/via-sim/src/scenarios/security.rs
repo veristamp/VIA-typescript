@@ -3,6 +3,95 @@ use crate::scenarios::traffic::create_log;
 use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
 
+// ============================================================================
+// API Reconnaissance Scenario
+// ============================================================================
+
+/// Stealthy bot exploring many different API endpoints from a single IP
+pub struct APIReconnaissance {
+    pub source_ip: String,
+    pub attack_rps: f64,
+    pub endpoints: Vec<String>,
+    trace_id: String,
+}
+
+impl APIReconnaissance {
+    pub fn new(ip: &str, rps: f64) -> Self {
+        let endpoints = vec![
+            "/api/v1/user/profile".to_string(),
+            "/api/v1/admin/config".to_string(),
+            "/api/v1/auth/token".to_string(),
+            "/api/v1/debug/dump".to_string(),
+            "/api/v1/internal/health".to_string(),
+            "/api/v1/payments/history".to_string(),
+            "/api/v1/settings/backup".to_string(),
+            "/api/v1/db/status".to_string(),
+        ];
+        
+        let hash = xxhash_rust::xxh3::xxh3_64(ip.as_bytes());
+
+        Self {
+            source_ip: ip.to_string(),
+            attack_rps: rps,
+            endpoints,
+            trace_id: format!("{:016x}", hash),
+        }
+    }
+}
+
+impl Scenario for APIReconnaissance {
+    fn name(&self) -> &str {
+        "API Reconnaissance"
+    }
+
+    fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
+        let mut rng = rng_for_tick("security/api_recon", current_time_ns, delta_ns);
+        let seconds = delta_ns as f64 / 1_000_000_000.0;
+        let count = (self.attack_rps * seconds).round() as u64;
+        let mut logs = Vec::new();
+
+        for i in 0..count {
+            let endpoint = self.endpoints.choose(&mut rng).unwrap();
+            let span_id = format!("{:016x}", i);
+
+            // Recon looks like normal 404s or 403s
+            let (status, level) = if rng.random_bool(0.8) {
+                (404, "WARN")
+            } else {
+                (403, "ERROR")
+            };
+
+            logs.push(create_log(
+                level,
+                format!("Access denied to {} for {}", endpoint, self.source_ip),
+                "api-gateway",
+                &self.trace_id,
+                &span_id,
+                current_time_ns + (i * 1_000_000),
+                vec![
+                    KeyValue {
+                        key: "http.status_code".to_string(),
+                        value: AnyValue::int(status),
+                    },
+                    KeyValue {
+                        key: "http.url".to_string(),
+                        value: AnyValue::string(endpoint.clone()),
+                    },
+                    KeyValue {
+                        key: "net.peer.ip".to_string(),
+                        value: AnyValue::string(self.source_ip.clone()),
+                    },
+                    KeyValue {
+                        key: "threat.category".to_string(),
+                        value: AnyValue::string("reconnaissance"),
+                    },
+                ],
+            ));
+        }
+        logs
+    }
+}
+
 // --- 1. Credential Stuffing / Brute Force ---
 pub struct CredentialStuffing {
     pub attack_rps: f64,

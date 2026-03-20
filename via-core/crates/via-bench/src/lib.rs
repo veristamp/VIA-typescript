@@ -700,4 +700,51 @@ pub mod scenarios {
             ..Default::default()
         }
     }
+
+    /// Adversarial benchmark - Hard Mode
+    pub fn adversarial_test() -> BenchmarkConfig {
+        BenchmarkConfig {
+            name: "Adversarial - Low and Slow Exfiltration".to_string(),
+            base_scenario: "normal_traffic".to_string(),
+            duration_minutes: 2,
+            tick_ms: 50,
+            anomalies: vec![AnomalySpec {
+                scenario: "low_slow".to_string(),
+                start_time_sec: 30,
+                duration_sec: 60,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Chaos Mode - Simultaneous Multi-Anomaly Event
+    pub fn black_swan_event() -> BenchmarkConfig {
+        BenchmarkConfig {
+            name: "Chaos - The Black Swan (DDoS + Exfil + Cascade)".to_string(),
+            base_scenario: "normal_traffic".to_string(),
+            duration_minutes: 4,
+            tick_ms: 50,
+            anomalies: vec![
+                // 1. The Diversion (DDoS)
+                AnomalySpec {
+                    scenario: "ddos".to_string(),
+                    start_time_sec: 30,
+                    duration_sec: 120,
+                },
+                // 2. The Real Attack (Low and Slow Exfil hiding in DDoS noise)
+                AnomalySpec {
+                    scenario: "low_slow".to_string(),
+                    start_time_sec: 45,
+                    duration_sec: 90,
+                },
+                // 3. The Consequence (Cascade failure triggered by load)
+                AnomalySpec {
+                    scenario: "cascade_failure".to_string(),
+                    start_time_sec: 100,
+                    duration_sec: 60,
+                },
+            ],
+            ..Default::default()
+        }
+    }
 }

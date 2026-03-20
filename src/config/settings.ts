@@ -1,14 +1,14 @@
 export const settings = {
 	queue: {
-		maxSize: 50000,
-		batchSize: 500,
-		flushInterval: 500,
-		maxWorkers: 16,
-		retryBaseDelayMs: 200,
+		maxSize: 100000,
+		batchSize: 1000,
+		flushInterval: 250,
+		maxWorkers: 32,
+		retryBaseDelayMs: 100,
 	},
 	embedding: {
-		batchSize: 64,
-		maxConcurrency: 4,
+		batchSize: 128,
+		maxConcurrency: 8,
 		cacheTtlSec: 900,
 		maxRetries: 2,
 	},

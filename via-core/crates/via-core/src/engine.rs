@@ -113,25 +113,31 @@ impl Detector for VolumeDetectorV2 {
         let smoothed_rps = self.rate_estimator.update(instant_rps);
 
         let previous_ts = self.last_timestamp;
+        let predicted = self.hw.predict();
+        let instant_deviation = instant_rps - predicted;
+
         self.last_timestamp = ctx.timestamp;
         self.warmup_count += 1;
 
-        let (predicted, deviation) = self.hw.update(smoothed_rps);
-
         if ctx.is_warmup || self.warmup_count < 50 {
+            let _ = self.hw.update(smoothed_rps);
             return None;
         }
 
-        // LEARNING GATE: Only update threshold model if 100ms have passed
-        // This prevents the threshold from 'chasing' high-frequency anomalies like DDoS
-        let last_update_delta = ctx.timestamp.saturating_sub(previous_ts);
-        if last_update_delta > 100_000_000 {
-            let _ = self.adaptive_threshold.update(deviation.abs());
+        let score = self.adaptive_threshold.anomaly_score(instant_deviation.abs());
+
+        // LEARNING GATE: Only update models if not anomalous
+        let is_normal = score == 0.0;
+        
+        if is_normal {
+            let _ = self.hw.update(smoothed_rps);
+            let last_update_delta = ctx.timestamp.saturating_sub(previous_ts);
+            if last_update_delta > 100_000_000 {
+                let _ = self.adaptive_threshold.update(instant_deviation.abs());
+            }
         }
 
-        let score = self.adaptive_threshold.anomaly_score(deviation.abs());
-
-        let prediction_error = deviation.abs() / predicted.max(1.0);
+        let prediction_error = instant_deviation.abs() / predicted.max(1.0);
         let confidence = if prediction_error < 0.1 {
             0.9
         } else if prediction_error < 0.3 {
@@ -149,9 +155,9 @@ impl Detector for VolumeDetectorV2 {
                 confidence,
                 reason: format!(
                     "Volume {}: expected {:.1} RPS, observed {:.1} RPS",
-                    if deviation > 0.0 { "spike" } else { "drop" },
+                    if instant_deviation > 0.0 { "spike" } else { "drop" },
                     predicted,
-                    smoothed_rps
+                    instant_rps
                 ),
             })
         } else {
@@ -766,12 +772,12 @@ impl Default for ProfileConfig {
             period: 24,
             hist_bins: 50,
             min_val: 0.0,
-            max_val: 10000.0,
+            max_val: 100000.0,
             hist_decay: 0.999,
-            confidence_threshold: 0.5,
+            confidence_threshold: 0.4,
             warmup_events: 50,
             min_detector_score_for_anomaly: 0.05,
-            min_ensemble_score_for_anomaly: 0.05,
+            min_ensemble_score_for_anomaly: 0.35,
             use_adaptive_ensemble_threshold: true,
         }
     }
@@ -802,6 +808,11 @@ pub struct AnomalyProfile {
     value_sum_sq: f64,
     last_timestamp: u64,
     frequency_ewma: EWMA,
+
+    /// Global Profiler (hash 0) for system-wide context
+    global_profiler: Option<Box<AnomalyProfile>>,
+    /// Global anomaly state
+    is_global_stressed: bool,
 }
 
 impl AnomalyProfile {
@@ -846,7 +857,16 @@ impl AnomalyProfile {
             v_drift.name().to_string(),
         ];
 
-        let ensemble = AdaptiveEnsemble::default_ensemble(detector_names);
+        let mut ensemble = AdaptiveEnsemble::default_ensemble(detector_names);
+        // SOTA: Boost detectors good at identifying 'adversarial' or 'stealthy' patterns
+        for (i, name) in ensemble.get_weights().iter().enumerate() {
+            if name.0.contains("RRCF") || name.0.contains("Behavioral") {
+                ensemble.set_bias(i, 2.5);
+            }
+            if name.0.contains("Burst") {
+                ensemble.set_bias(i, 2.0);
+            }
+        }
 
         Self {
             v_volume,
@@ -866,6 +886,8 @@ impl AnomalyProfile {
             value_sum_sq: 0.0,
             last_timestamp: 0,
             frequency_ewma: EWMA::new(100.0),
+            global_profiler: None,
+            is_global_stressed: false,
         }
     }
 
@@ -906,6 +928,25 @@ impl AnomalyProfile {
         unique_id_hash: u64,
         value: f64,
     ) -> AnomalySignal {
+        // SOTA: Double-Entry Profiling
+        // 1. Process Global aggregate (hash 0) to catch macroscopic context (DDoS/Spikes)
+        // Ensure we only do this once at the top level to avoid infinite recursion
+        if unique_id_hash != 0 {
+            if self.global_profiler.is_none() {
+                // Initialize global profiler without a nested global profiler
+                let mut cfg = self.config.clone();
+                cfg.warmup_events = 20; // Faster warmup for aggregate data
+                self.global_profiler = Some(Box::new(AnomalyProfile::with_config(cfg)));
+            }
+
+            if let Some(ref mut global) = self.global_profiler {
+                // Global profiler always uses hash 0
+                let global_signal = global.process_with_hash(timestamp, 0, value);
+                // System-wide context: if aggregate volume/ensemble is screaming, the whole system is under stress
+                self.is_global_stressed = global_signal.is_anomaly && global_signal.ensemble_score > 0.4;
+            }
+        }
+
         self.event_count += 1;
 
         // Update baseline tracking
@@ -1071,23 +1112,66 @@ impl AnomalyProfile {
             ensemble_confidence,
         );
         let adjusted_score = (ensemble_score * policy_effect.score_scale).clamp(0.0, 1.0);
-        let adjusted_confidence =
+        
+        // SOTA: Apply Global Stress Boost
+        // If the macroscopic profiler detected a global attack (DDoS), boost individual signals
+        let final_ensemble_score = if self.is_global_stressed {
+            (adjusted_score * 2.5).clamp(0.0, 1.0)
+        } else {
+            adjusted_score
+        };
+
+        let mut final_confidence =
             (ensemble_confidence * policy_effect.confidence_scale).clamp(0.0, 1.0);
+        if self.is_global_stressed {
+            final_confidence = final_confidence.max(0.9);
+        }
 
         // Build the signal
-        let severity = Severity::from_score(adjusted_score);
+        let severity = Severity::from_score(final_ensemble_score);
 
         // Hybrid decision: detector floor + ensemble score floor + adaptive ensemble threshold.
-        let any_detector_fired = detector_scores
+        let detectors_fired_count = detector_scores
             .iter()
-            .any(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly);
+            .filter(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly)
+            .count();
+            
         let adaptive_trigger = self.config.use_adaptive_ensemble_threshold
-            && self.ensemble.is_anomaly(adjusted_score)
-            && adjusted_confidence >= self.config.confidence_threshold;
-        let score_floor_trigger = adjusted_score >= self.config.min_ensemble_score_for_anomaly;
+            && self.ensemble.is_anomaly(final_ensemble_score)
+            && final_confidence >= self.config.confidence_threshold;
+        let score_floor_trigger = final_ensemble_score >= self.config.min_ensemble_score_for_anomaly;
 
-        let is_anomaly = !policy_effect.suppress
-            && (any_detector_fired || adaptive_trigger || score_floor_trigger);
+        // SOTA: High-Confidence Volumetric Pass
+        // Volume detector ID is 0. If it's screaming (score > 0.9) and confidence is high, 
+        // we don't wait for consensus.
+        let volumetric_screaming = detector_scores[0].fired && detector_scores[0].score > 0.9 && final_confidence > 0.7;
+
+        // SOTA: High-Magnitude Override
+        // If a single detector is absolutely screaming (e.g. Volume during DDoS), 
+        // don't let the ensemble average wash it out.
+        let mut high_magnitude_override = false;
+        for output in &detector_outputs[..output_count] {
+            if output.score > 0.95 && output.confidence > 0.8 {
+                high_magnitude_override = true;
+                break;
+            }
+        }
+
+        // CONSENSUS GATE: Distinguish noise from real anomalies
+        let consensus_reached = if volumetric_screaming || high_magnitude_override {
+            true // Fast-pass for clear volumetric attacks (DDoS/Spikes)
+        } else if self.is_global_stressed && detectors_fired_count >= 1 {
+            true // SOTA: If global context is stressed, trust single local triggers
+        } else if detectors_fired_count >= 2 {
+            true // High confidence when multiple indicators agree
+        } else if final_ensemble_score > 0.8 && final_confidence > 0.8 {
+            true // Extreme ensemble agreement
+        } else {
+            // Single detector trigger or low score requires higher threshold
+            score_floor_trigger && (adaptive_trigger || final_confidence > 0.8)
+        };
+
+        let is_anomaly = !policy_effect.suppress && consensus_reached && !is_warmup;
 
         AnomalySignal {
             entity_hash: unique_id_hash,
@@ -1095,8 +1179,8 @@ impl AnomalyProfile {
             sequence: self.event_count,
             is_anomaly,
             severity,
-            ensemble_score: adjusted_score,
-            confidence: adjusted_confidence,
+            ensemble_score: final_ensemble_score,
+            confidence: final_confidence,
             detector_scores,
             detector_weights: weight_array,
             attribution,

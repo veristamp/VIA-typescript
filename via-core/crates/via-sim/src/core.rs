@@ -46,10 +46,8 @@ pub struct LogRecord {
     pub body: AnyValue,
     pub attributes: Vec<KeyValue>,
     /// Ground truth: is this log part of an injected anomaly?
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub isGroundTruthAnomaly: bool,
     /// Ground truth: anomaly ID if this log is part of an anomaly
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anomalyId: Option<String>,
 }
 
@@ -92,6 +90,7 @@ impl LogRecord {
             "process.memory.usage",
             "process.cpu.utilization",
             "http.status_code",
+            "http.response.body.size",
         ] {
             if let Some(v) = self.get_attribute(key) {
                 if let Some(n) = v.as_f64() {

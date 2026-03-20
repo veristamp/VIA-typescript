@@ -92,13 +92,16 @@ impl Scenario for DDoSAttack {
                 ("INFO", 200, lat, "Request processed")
             };
 
+            // SOTA: Distribute timestamps evenly across the tick to avoid Infinite RPS spikes
+            let log_ts = current_time_ns + (i * delta_ns / count.max(1));
+
             logs.push(create_log(
                 level,
                 format!("{} from {}", msg, source_ip),
                 &self.target_service,
                 trace_id,
                 &span_id,
-                current_time_ns + (i * 1_000_000),
+                log_ts,
                 vec![
                     KeyValue {
                         key: "http.status_code".to_string(),
@@ -302,6 +305,120 @@ impl Scenario for DataExfiltration {
                     KeyValue {
                         key: "threat.category".to_string(),
                         value: AnyValue::string("data_exfiltration"),
+                    },
+                ],
+            ));
+        }
+        logs
+    }
+}
+
+// ============================================================================
+// Low and Slow Exfiltration Scenario
+// ============================================================================
+
+/// Stealthy exfiltration that drifts with the baseline and pulses intermittently
+pub struct LowAndSlowExfiltration {
+    pub target_endpoint: String,
+    pub base_rps: f64,
+    pub exfil_ratio: f64, // Ratio of exfil logs to normal logs
+    pub pulse_frequency: f64, // Hz
+    pub source_ips: Vec<String>,
+    pub ip_trace_ids: Vec<String>,
+    pub accumulator: f64,
+}
+
+impl LowAndSlowExfiltration {
+    pub fn new(target: &str, base_rps: f64, exfil_ratio: f64) -> Self {
+        let mut rng = rng_for_init("distributed/low_and_slow");
+        let source_ips: Vec<String> = (0..8)
+            .map(|_| {
+                format!(
+                    "10.0.{}.{}",
+                    rng.random_range(1..255),
+                    rng.random_range(1..255)
+                )
+            })
+            .collect();
+
+        let ip_trace_ids: Vec<String> = source_ips
+            .iter()
+            .map(|ip| {
+                let hash = xxhash_rust::xxh3::xxh3_64(ip.as_bytes());
+                format!("{:016x}", hash)
+            })
+            .collect();
+
+        Self {
+            target_endpoint: target.to_string(),
+            base_rps,
+            exfil_ratio,
+            pulse_frequency: 0.1, // Pulse every 10 seconds
+            source_ips,
+            ip_trace_ids,
+            accumulator: 0.0,
+        }
+    }
+}
+
+impl Scenario for LowAndSlowExfiltration {
+    fn name(&self) -> &str {
+        "Low and Slow Exfiltration"
+    }
+
+    fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
+        let mut rng = rng_for_tick("distributed/low_and_slow", current_time_ns, delta_ns);
+        let seconds = delta_ns as f64 / 1_000_000_000.0;
+        let time_sec = current_time_ns as f64 / 1_000_000_000.0;
+        
+        // Pulse logic: use sine wave to fluctuate exfil rate
+        let pulse = (time_sec * self.pulse_frequency * 2.0 * std::f64::consts::PI).sin().max(0.0);
+        let current_exfil_rps = self.base_rps * self.exfil_ratio * pulse;
+        
+        self.accumulator += current_exfil_rps * seconds;
+        let count = self.accumulator.floor() as u64;
+        self.accumulator -= count as f64;
+        
+        let mut logs = Vec::new();
+
+        for i in 0..count {
+            let ip_idx = (i as usize) % self.source_ips.len();
+            let source_ip = &self.source_ips[ip_idx];
+            let trace_id = &self.ip_trace_ids[ip_idx];
+            let span_id = format!("{:016x}", i);
+
+            // Hide in "normal" logs - look like standard 200 OKs
+            // But with slightly elevated response size (the exfil part)
+            let base_size = 512;
+            let exfil_size = base_size + rng.random_range(2048..8192);
+
+            logs.push(create_log(
+                "INFO",
+                format!("Request processed for {}", source_ip),
+                "api-gateway",
+                trace_id,
+                &span_id,
+                current_time_ns + (i * 1_000_000),
+                vec![
+                    KeyValue {
+                        key: "http.status_code".to_string(),
+                        value: AnyValue::int(200),
+                    },
+                    KeyValue {
+                        key: "http.response.body.size".to_string(),
+                        value: AnyValue::int(exfil_size),
+                    },
+                    KeyValue {
+                        key: "net.peer.ip".to_string(),
+                        value: AnyValue::string(source_ip.clone()),
+                    },
+                    KeyValue {
+                        key: "http.url".to_string(),
+                        value: AnyValue::string(format!("{}/v1/data", self.target_endpoint)),
+                    },
+                    KeyValue {
+                        key: "threat.type".to_string(),
+                        value: AnyValue::string("stealth_exfil"),
                     },
                 ],
             ));

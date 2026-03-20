@@ -274,6 +274,7 @@ impl PipelineBenchmarkRunner {
         latencies_micros.push(start.elapsed().as_micros() as u64);
 
         if log.isGroundTruthAnomaly {
+            eprintln!("DEBUG: process_log found anomaly! id={:?}", log.anomalyId);
             counts.gt_events += 1;
             gt_diag.gt_logs += 1;
             if let Some(id) = ground_truth_id.as_ref() {
@@ -404,6 +405,7 @@ impl PipelineBenchmarkRunner {
             if let Some(anomaly_id) =
                 engine.schedule_anomaly(&anomaly.scenario, start_offset_ns, duration_ns)
             {
+                eprintln!("DEBUG: Scheduled pipeline anomaly {} (id: {})", anomaly.scenario, anomaly_id);
                 let start_time_ns = start_offset_ns;
                 let end_time_ns = start_offset_ns + duration_ns;
                 anomaly_manifest.push(ScheduledAnomalyManifest {
@@ -417,6 +419,8 @@ impl PipelineBenchmarkRunner {
                     start_time_ns,
                     end_time_ns,
                 });
+            } else {
+                eprintln!("DEBUG: Failed to schedule pipeline anomaly {}", anomaly.scenario);
             }
         }
 
@@ -693,6 +697,8 @@ pub fn scenario_by_name(name: &str) -> BenchmarkConfig {
     match name {
         "mixed" => scenarios::mixed_workload(),
         "mixed_fast" => scenarios::mixed_fast(),
+        "adversarial" => scenarios::adversarial_test(),
+        "chaos" => scenarios::black_swan_event(),
         "security" => scenarios::security_audit(),
         "performance" => scenarios::performance_stress(),
         "quick" => scenarios::quick_validation(),

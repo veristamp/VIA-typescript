@@ -4,6 +4,73 @@ use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
 use rand_distr::{Distribution, Normal};
 
+// ============================================================================
+// Zombie Process Scenario
+// ============================================================================
+
+/// A process that leaks memory slowly, but periodically 'cleans up' to hide from simple thresholds
+pub struct ZombieProcess {
+    pub service_name: String,
+    pub leak_rate_mb_per_sec: f64,
+    pub current_memory_mb: f64,
+}
+
+impl ZombieProcess {
+    pub fn new(service: &str, leak_rate: f64) -> Self {
+        Self {
+            service_name: service.to_string(),
+            leak_rate_mb_per_sec: leak_rate,
+            current_memory_mb: 128.0,
+        }
+    }
+}
+
+impl Scenario for ZombieProcess {
+    fn name(&self) -> &str {
+        "Zombie Process"
+    }
+
+    fn tick(&mut self, current_time_ns: u64, delta_ns: u64) -> Vec<LogRecord> {
+        let mut rng = rng_for_tick("performance/zombie", current_time_ns, delta_ns);
+        let seconds = delta_ns as f64 / 1_000_000_000.0;
+        
+        // Decoy cleanup: 10% chance to drop memory significantly to hide trend
+        if rng.random_bool(0.1) {
+            self.current_memory_mb *= 0.8;
+        } else {
+            self.current_memory_mb += self.leak_rate_mb_per_sec * seconds;
+        }
+
+        let mut logs = Vec::new();
+        if rng.random_bool(0.5) {
+            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
+            logs.push(create_log(
+                "INFO",
+                format!("Background task heartbeat (memory: {:.1}MB)", self.current_memory_mb),
+                &self.service_name,
+                &trace_id,
+                &span_id,
+                current_time_ns,
+                vec![
+                    KeyValue {
+                        key: "process.memory.usage".to_string(),
+                        value: AnyValue::double(self.current_memory_mb),
+                    },
+                    KeyValue {
+                        key: "process.cpu.utilization".to_string(),
+                        value: AnyValue::double(rng.random_range(0.01..0.05)),
+                    },
+                    KeyValue {
+                        key: "threat.category".to_string(),
+                        value: AnyValue::string("resource_exhaustion"),
+                    },
+                ],
+            ));
+        }
+        logs
+    }
+}
+
 // --- 1. Memory Leak ---
 pub struct MemoryLeak {
     pub service_name: String,

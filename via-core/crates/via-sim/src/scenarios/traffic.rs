@@ -76,7 +76,7 @@ impl Scenario for NormalTraffic {
 
         let mut logs = Vec::new();
 
-        for _ in 0..count {
+        for i in 0..count {
             let service = self.services.choose(&mut rng).unwrap();
             let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
 
@@ -119,13 +119,19 @@ impl Scenario for NormalTraffic {
 
             let body = format!("Request processed in {}ms", latency);
 
+            // SOTA: Distribute timestamps evenly across the tick to avoid Infinite RPS spikes
+            let log_ts = current_time_ns + (i * delta_ns / count.max(1));
+
+            // SOTA: Distribute timestamps evenly across the tick to avoid Infinite RPS spikes
+            let log_ts = current_time_ns + (i * delta_ns / count.max(1));
+
             logs.push(create_log(
                 level,
                 body,
                 service,
                 &trace_id,
                 &span_id,
-                current_time_ns,
+                log_ts,
                 attrs,
             ));
         }

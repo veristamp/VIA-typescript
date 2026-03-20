@@ -238,10 +238,21 @@ export class ForensicAnalysisService {
 
 		const acc = new Map<string, CandidateAccumulator>();
 
+		// SOTA: Cross-Bucket Merging
+		// Map of key -> incidentId to ensure we merge incidents across buckets if they share identity
+		const primaryIncidents = new Map<string, string>();
+
 		for (const [traceId, grouped] of byTrace.entries()) {
 			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
-			const incidentId = this.buildIncidentId("trace", traceId, 0);
+			
+			const key = `trace:${traceId}`;
+			let incidentId = primaryIncidents.get(key);
+			if (!incidentId) {
+				incidentId = this.buildIncidentId("trace", traceId, 0);
+				primaryIncidents.set(key, incidentId);
+			}
+
 			for (const hit of highSignalHits) {
 				this.accumulate(
 					acc,
@@ -249,7 +260,7 @@ export class ForensicAnalysisService {
 					hit,
 					"trace",
 					1.0,
-					`trace:${traceId}`,
+					key,
 					{ trace_id: traceId },
 				);
 			}
@@ -258,7 +269,14 @@ export class ForensicAnalysisService {
 		for (const [rhythmHash, grouped] of byRhythm.entries()) {
 			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
-			const incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
+
+			const key = `rhythm:${rhythmHash}`;
+			let incidentId = primaryIncidents.get(key);
+			if (!incidentId) {
+				incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
+				primaryIncidents.set(key, incidentId);
+			}
+
 			for (const hit of highSignalHits) {
 				this.accumulate(
 					acc,
@@ -266,7 +284,7 @@ export class ForensicAnalysisService {
 					hit,
 					"semantic",
 					0.85,
-					`rhythm:${rhythmHash}`,
+					key,
 					{ rhythm_hash: rhythmHash },
 				);
 			}
@@ -275,28 +293,44 @@ export class ForensicAnalysisService {
 		for (const [bucket, grouped] of byTemporalBucket.entries()) {
 			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
-			const incidentId = this.buildIncidentId(
-				"temporal",
-				bucket,
-				Number(bucket) * 60,
-			);
-			for (const hit of highSignalHits) {
-				this.accumulate(
-					acc,
-					incidentId,
-					hit,
-					"temporal",
-					0.8,
-					`bucket:${bucket}`,
-					{ temporal_bucket: bucket },
-				);
+
+			// SOTA: For temporal buckets, we use the entity hash if available to merge
+			const entityKeys = new Set(highSignalHits.map(h => 
+				String((h.payload as any)?.entity_id || (h.payload as any)?.entity_hash || bucket)
+			));
+
+			for (const entityKey of entityKeys) {
+				const key = `temporal:${entityKey}`;
+				let incidentId = primaryIncidents.get(key);
+				if (!incidentId) {
+					incidentId = this.buildIncidentId("temporal", entityKey, Number(bucket) * 60);
+					primaryIncidents.set(key, incidentId);
+				}
+
+				for (const hit of highSignalHits) {
+					const hitEntity = String((hit.payload as any)?.entity_id || (hit.payload as any)?.entity_hash || bucket);
+					if (hitEntity !== entityKey) continue;
+
+					this.accumulate(
+						acc,
+						incidentId,
+						hit,
+						"temporal",
+						0.8,
+						key,
+						{ temporal_bucket: bucket },
+					);
+				}
 			}
 		}
 
 		const candidates: IncidentCandidate[] = [];
 		for (const [incidentId, value] of acc.entries()) {
 			const memberCount = value.memberPointIds.size;
-			if (value.reason === "temporal" && memberCount < 2) {
+			// SOTA Density Check: 
+			// Random noise is sparse. Real attacks (even low-and-slow) cluster over time.
+			// Require at least 5 points for a temporal incident to be promoted.
+			if (value.reason === "temporal" && memberCount < 5) {
 				continue;
 			}
 			if (
@@ -378,6 +412,9 @@ export class ForensicAnalysisService {
 			const severityMax = Math.max(...events.map((e) => e.severity));
 			const scoreMax = Math.max(...events.map((e) => e.score));
 			const confidence = Math.max(...events.map((e) => e.confidence));
+
+			// SOTA: Seeded GT groups require minimum signal density to avoid hallucination
+			if (events.length < 3) continue;
 
 			seededCandidates.push({
 				incidentId: `gt_${gtId}`,

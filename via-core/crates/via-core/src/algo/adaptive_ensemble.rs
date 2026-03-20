@@ -379,6 +379,9 @@ pub struct AdaptiveEnsemble {
     p2_estimator: P2QuantileEstimator,
     /// Adaptive threshold
     adaptive_threshold: f64,
+    /// Manual bias weights (static multipliers for specific detectors)
+    #[serde(default)]
+    bias_weights: [f64; NUM_DETECTORS],
 }
 
 /// Detection result from individual detector
@@ -406,6 +409,18 @@ impl AdaptiveEnsemble {
             *w = uniform;
         }
 
+        let mut bias_weights = [1.0; NUM_DETECTORS];
+        // SOTA BIAS: Prioritize detectors that find 'hidden' patterns
+        // RRCF (ID 6) and Behavioral (ID 8) are key for exfiltration
+        for (i, name) in detector_names.iter().enumerate() {
+            if name.contains("RRCF") || name.contains("Behavioral") {
+                bias_weights[i] = 2.5;
+            }
+            if name.contains("Spectral") || name.contains("Burst") {
+                bias_weights[i] = 2.0;
+            }
+        }
+
         Self {
             num_detectors: n,
             performance: (0..n).map(|_| DetectorPerformance::new(50)).collect(),
@@ -417,6 +432,14 @@ impl AdaptiveEnsemble {
             detector_names,
             p2_estimator: P2QuantileEstimator::new(0.95),
             adaptive_threshold: 0.5,
+            bias_weights,
+        }
+    }
+
+    /// Set bias for a specific detector
+    pub fn set_bias(&mut self, detector_id: usize, bias: f64) {
+        if detector_id < NUM_DETECTORS {
+            self.bias_weights[detector_id] = bias;
         }
     }
 
@@ -440,7 +463,7 @@ impl AdaptiveEnsemble {
 
         for output in outputs {
             if output.detector_id < self.num_detectors {
-                let weight = self.current_weights[output.detector_id];
+                let weight = self.current_weights[output.detector_id] * self.bias_weights[output.detector_id];
                 let weighted = output.score * weight * output.confidence;
                 weighted_score += weighted;
                 total_weight += weight * output.confidence;
@@ -684,6 +707,15 @@ impl AdaptiveEnsemble {
         self.update_count = 0;
         self.p2_estimator = P2QuantileEstimator::new(0.95);
         self.adaptive_threshold = 0.5;
+        self.bias_weights = [1.0; NUM_DETECTORS];
+        for (i, name) in self.detector_names.iter().enumerate() {
+            if name.contains("RRCF") || name.contains("Behavioral") {
+                self.bias_weights[i] = 2.5;
+            }
+            if name.contains("Spectral") || name.contains("Burst") {
+                self.bias_weights[i] = 2.0;
+            }
+        }
     }
 }
 
