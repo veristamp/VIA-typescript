@@ -6,15 +6,20 @@ import {
 	getCurrentActivePolicy,
 	getIncidentGraph,
 	getLatestDeadLetters,
+	getLatestEvaluationMetrics,
+	getSchema,
 	getTier1PolicyByVersion,
 	getTier2IncidentById,
+	listSchemas,
 	listTier1Policies,
 	listTier2Decisions,
 	listTier2Incidents,
 	listTier2IncidentsForRun,
 	patchAnomaly,
 	saveDeadLetter,
+	saveEvaluationMetrics,
 	saveIncidentGraph,
+	saveSchema,
 	saveTier2Decision,
 	upsertTier1PolicyArtifact,
 	upsertTier2Incident,
@@ -22,8 +27,10 @@ import {
 import type {
 	Tier2ControlRepository,
 	Tier2DeadLetterRepository,
+	Tier2EvaluationRepository,
 	Tier2IncidentGraphRepository,
 	Tier2IncidentRepository,
+	Tier2SchemaRepository,
 } from "../ports/repositories";
 
 export const tier2IncidentRepository: Tier2IncidentRepository = {
@@ -56,4 +63,15 @@ export const tier2DeadLetterRepository: Tier2DeadLetterRepository = {
 export const tier2IncidentGraphRepository: Tier2IncidentGraphRepository = {
 	saveIncidentGraph,
 	getIncidentGraph,
+};
+
+export const tier2SchemaRepository: Tier2SchemaRepository = {
+	getSchema,
+	saveSchema,
+	listSchemas,
+};
+
+export const tier2EvaluationRepository: Tier2EvaluationRepository = {
+	saveEvaluationMetrics,
+	getLatestEvaluationMetrics,
 };

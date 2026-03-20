@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Tier2ControlRepository } from "../../../src/modules/tier2/ports/repositories";
 import { ControlService } from "../../../src/services/control-service";
 import type { CompiledPolicyArtifact } from "../../../src/services/policy-compiler-service";
+import type { Tier1SyncService } from "../../../src/services/tier1-sync-service";
 
 function createControlRepo(): Tier2ControlRepository & {
 	activations: string[];
@@ -50,6 +51,14 @@ function createControlRepo(): Tier2ControlRepository & {
 	};
 }
 
+function createMockTier1Sync(): Tier1SyncService {
+	return {
+		isEnabled: () => false,
+		async sendFeedback() {},
+		async pushPolicySnapshot() {},
+	} as unknown as Tier1SyncService;
+}
+
 describe("ControlService", () => {
 	it("compiles policy artifacts through injected compiler and repository", async () => {
 		const repo = createControlRepo();
@@ -66,7 +75,7 @@ describe("ControlService", () => {
 					featureFlags: {},
 				}) as CompiledPolicyArtifact,
 		};
-		const service = new ControlService(compiler as never, repo);
+		const service = new ControlService(compiler as never, repo, createMockTier1Sync());
 		const artifact = await service.compilePolicy(10);
 		expect(artifact.policyVersion).toBe("policy-1");
 		expect(repo.artifacts.length).toBe(1);
@@ -74,14 +83,14 @@ describe("ControlService", () => {
 
 	it("publishes known policy versions", async () => {
 		const repo = createControlRepo();
-		const service = new ControlService(undefined, repo);
+		const service = new ControlService(undefined, repo, createMockTier1Sync());
 		await service.publishPolicy("known");
 		expect(repo.activations).toEqual(["known"]);
 	});
 
 	it("rejects publishing unknown policy versions", async () => {
 		const repo = createControlRepo();
-		const service = new ControlService(undefined, repo);
+		const service = new ControlService(undefined, repo, createMockTier1Sync());
 		await expect(service.publishPolicy("missing")).rejects.toThrow(
 			"policy not found: missing",
 		);

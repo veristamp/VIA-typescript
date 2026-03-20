@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import client from '../../../api/rpc';
-import { IncidentsResponse } from '../types';
+import { type IncidentsResponse } from '../types';
 
 export const useIncidents = (limit: number = 50, interval: number = 5000) => {
   return useQuery({

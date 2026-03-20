@@ -362,12 +362,12 @@ export class QdrantService {
 
 			await this.ensurePayloadIndex(collectionName, "start_ts", "integer");
 			await this.ensurePayloadIndex(collectionName, "timestamp", "integer");
-				await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
-				await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
-				await this.ensurePayloadIndex(collectionName, "entity_hash", "keyword");
-				await this.ensurePayloadIndex(collectionName, "group_key", "keyword");
-				await this.ensurePayloadIndex(collectionName, "service", "keyword");
-				await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
+			await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
+			await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
+			await this.ensurePayloadIndex(collectionName, "entity_hash", "keyword");
+			await this.ensurePayloadIndex(collectionName, "group_key", "keyword");
+			await this.ensurePayloadIndex(collectionName, "service", "keyword");
+			await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
 			await this.ensurePayloadIndex(collectionName, "body", {
 				type: "text",
 				tokenizer: "word",
@@ -431,7 +431,9 @@ export class QdrantService {
 						const idx = embedIndices[i];
 						denseVectors[idx] =
 							embedded[i] ??
-							this.generateFallbackVector(collectionEvents[idx].textForEmbedding);
+							this.generateFallbackVector(
+								collectionEvents[idx].textForEmbedding,
+							);
 					}
 				}
 				const points = collectionEvents.map((event, idx) => {
@@ -497,7 +499,10 @@ export class QdrantService {
 
 		try {
 			const queryClient = this.client as unknown as {
-				query: (collectionName: string, payload: Record<string, unknown>) => Promise<{ points?: QdrantScoredPoint[] } | QdrantScoredPoint[]>;
+				query: (
+					collectionName: string,
+					payload: Record<string, unknown>,
+				) => Promise<{ points?: QdrantScoredPoint[] } | QdrantScoredPoint[]>;
 			};
 			const response = await queryClient.query(collection, {
 				query: { context },
@@ -559,7 +564,7 @@ export class QdrantService {
 								using: "log_dense_vector",
 								filter: queryFilter,
 								group_by: "group_key",
-								group_size: 3,
+								group_size: 10,
 								limit: 100,
 								with_payload: true,
 								score_threshold: 0.15,
@@ -568,7 +573,7 @@ export class QdrantService {
 						return await this.client.queryGroups(collection, {
 							filter: queryFilter,
 							group_by: "group_key",
-							group_size: 3,
+							group_size: 10,
 							limit: 100,
 							with_payload: true,
 						});
@@ -578,26 +583,32 @@ export class QdrantService {
 				}),
 			);
 
-			const grouped = new Map<string, QdrantScoredPoint>();
+			const allHits: QdrantScoredPoint[] = [];
 			for (const result of groupedResults) {
-				const groups = (result as { groups?: Array<{ id: string | number; hits?: Array<QdrantScoredPoint> }> }).groups ?? [];
+				const groups =
+					(
+						result as {
+							groups?: Array<{
+								id: string | number;
+								hits?: Array<QdrantScoredPoint>;
+							}>;
+						}
+					).groups ?? [];
 				for (const group of groups) {
-					const topHit = group.hits?.[0];
-					if (!topHit) continue;
-					const key = String(group.id);
-					if (grouped.has(key)) continue;
-					grouped.set(key, {
-						...topHit,
-						payload: {
-							...(topHit.payload ?? {}),
-							group_key: group.id,
-							count: group.hits?.length ?? 1,
-						},
-					});
+					const groupHits = group.hits ?? [];
+					for (const hit of groupHits) {
+						allHits.push({
+							...hit,
+							payload: {
+								...(hit.payload ?? {}),
+								group_key: group.id,
+							},
+						});
+					}
 				}
 			}
 
-			if (grouped.size === 0) {
+			if (allHits.length === 0) {
 				// Fallback for clusters when grouping is unavailable.
 				const results = await Promise.all(
 					collections.map((collection) =>
@@ -616,23 +627,28 @@ export class QdrantService {
 					for (const point of points) {
 						const groupKey = String(
 							point.payload?.group_key ??
-							point.payload?.rhythm_hash ??
+								point.payload?.rhythm_hash ??
 								point.payload?.entity_hash ??
 								point.payload?.entity_id ??
 								point.id,
 						);
-						if (!grouped.has(groupKey)) {
-							grouped.set(groupKey, point);
-						}
+						allHits.push({
+							...point,
+							payload: {
+								...(point.payload ?? {}),
+								group_key: groupKey,
+							},
+						});
 					}
 				}
 			}
 
-			const baseHits = Array.from(grouped.values());
 			const refinedByCollection = await Promise.all(
 				collections.map(async (collection) => {
-					const localHits = baseHits.filter((hit) => {
-						const ts = Number(hit.payload?.start_ts ?? hit.payload?.timestamp ?? 0);
+					const localHits = allHits.filter((hit) => {
+						const ts = Number(
+							hit.payload?.start_ts ?? hit.payload?.timestamp ?? 0,
+						);
 						const localCollection = this.getDailyCollectionName(
 							this.tier2CollectionPrefix,
 							Number.isFinite(ts) ? Math.floor(ts) : startTs,
@@ -710,7 +726,9 @@ export class QdrantService {
 				}),
 			);
 			const allHits = groupedResults.flatMap((result) => {
-				const groups = (result as { groups?: Array<{ hits?: QdrantScoredPoint[] }> }).groups ?? [];
+				const groups =
+					(result as { groups?: Array<{ hits?: QdrantScoredPoint[] }> })
+						.groups ?? [];
 				return groups.flatMap((group) => group.hits ?? []);
 			});
 
@@ -724,67 +742,8 @@ export class QdrantService {
 	}
 
 	private async getEmbedding(text: string): Promise<number[]> {
-		const cached = this.getCachedEmbedding(text);
-		if (cached) {
-			return cached;
-		}
-
-		const now = Date.now();
-		if (now < this.embeddingUnavailableUntilMs) {
-			return this.generateFallbackVector(text);
-		}
-
-		try {
-			const response = await fetch(`${this.embeddingBaseUrl}/embeddings`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: this.embeddingModel,
-					input: text,
-					dimensions: this.embeddingDimension,
-				}),
-			});
-
-			if (!response.ok) {
-				this.embeddingUnavailableUntilMs = now + 5_000;
-				if (!this.embeddingDegradedLogged) {
-					logger.warn("Embedding service unavailable, using fallback", {
-						status: response.status,
-					});
-					this.embeddingDegradedLogged = true;
-				}
-				const fallback = this.generateFallbackVector(text);
-				this.cacheEmbedding(text, fallback);
-				return fallback;
-			}
-
-			const data = (await response.json()) as {
-				data?: Array<{ embedding?: number[] }>;
-				embeddings?: number[][];
-			};
-			this.embeddingUnavailableUntilMs = 0;
-			this.embeddingDegradedLogged = false;
-
-			const openAiVector = data.data?.[0]?.embedding;
-			const legacyVector = data.embeddings?.[0];
-			const selected = openAiVector || legacyVector;
-			const vector = selected
-				? this.normalizeEmbeddingDimensions(selected)
-				: this.generateFallbackVector(text);
-			this.cacheEmbedding(text, vector);
-			return vector;
-		} catch (error) {
-			this.embeddingUnavailableUntilMs = now + 5_000;
-			if (!this.embeddingDegradedLogged) {
-				logger.warn("Embedding request failed, using fallback", {
-					error: String(error),
-				});
-				this.embeddingDegradedLogged = true;
-			}
-			const fallback = this.generateFallbackVector(text);
-			this.cacheEmbedding(text, fallback);
-			return fallback;
-		}
+		const [vector] = await this.getEmbeddings([text]);
+		return vector ?? this.generateFallbackVector(text);
 	}
 
 	private normalizeEmbeddingDimensions(vector: number[]): number[] {
@@ -842,7 +801,6 @@ export class QdrantService {
 	}
 
 	private generateId(): string {
-		return crypto.randomUUID();
 		return crypto.randomUUID();
 	}
 }

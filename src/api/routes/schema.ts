@@ -8,13 +8,6 @@ import type {
 
 const app = new Hono();
 
-// Type definitions for Hono context
-declare module "hono" {
-	interface ContextVariableMap {
-		schemaService: SchemaService;
-	}
-}
-
 // Validation schemas
 const DetectSchemaRequestSchema = z.object({
 	sourceName: z.string(),

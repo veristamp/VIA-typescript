@@ -662,4 +662,42 @@ pub mod scenarios {
             ..Default::default()
         }
     }
+
+    /// Mixed fast benchmark
+    pub fn mixed_fast() -> BenchmarkConfig {
+        BenchmarkConfig {
+            name: "Mixed Fast - All Types".to_string(),
+            base_scenario: "normal_traffic".to_string(),
+            duration_minutes: 3,
+            tick_ms: 50,
+            anomalies: vec![
+                AnomalySpec {
+                    scenario: "credential_stuffing".to_string(),
+                    start_time_sec: 10,
+                    duration_sec: 20,
+                },
+                AnomalySpec {
+                    scenario: "ddos".to_string(),
+                    start_time_sec: 40,
+                    duration_sec: 15,
+                },
+                AnomalySpec {
+                    scenario: "memory_leak".to_string(),
+                    start_time_sec: 65,
+                    duration_sec: 20,
+                },
+                AnomalySpec {
+                    scenario: "slow_queries".to_string(),
+                    start_time_sec: 95,
+                    duration_sec: 15,
+                },
+                AnomalySpec {
+                    scenario: "traffic_spike".to_string(),
+                    start_time_sec: 120,
+                    duration_sec: 15,
+                },
+            ],
+            ..Default::default()
+        }
+    }
 }

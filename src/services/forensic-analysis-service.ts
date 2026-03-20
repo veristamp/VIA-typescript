@@ -5,7 +5,6 @@ import type { LGTMService } from "./lgtm-service";
 import type { QdrantScoredPoint, QdrantService } from "./qdrant-service";
 
 export interface ClusterResult {
-// ... existing ClusterResult ...
 	clusterId: string | number;
 	incidentCount: number;
 	topHit: {
@@ -41,11 +40,20 @@ export class ForensicAnalysisService {
 		private readonly incidentGraphRepository: Tier2IncidentGraphRepository = tier2IncidentGraphRepository,
 	) {}
 
-	async enrichIncident(incidentId: string, traceId: string, startTs: number, endTs: number) {
+	async enrichIncident(
+		incidentId: string,
+		traceId: string,
+		startTs: number,
+		endTs: number,
+	) {
 		const [trace, logs, metrics] = await Promise.all([
 			this.lgtmService.getTrace(traceId),
 			this.lgtmService.getLogs(`{trace_id="${traceId}"}`, startTs, endTs),
-			this.lgtmService.getMetrics(`sum(rate(http_requests_total[1m]))`, startTs, endTs),
+			this.lgtmService.getMetrics(
+				`sum(rate(http_requests_total[1m]))`,
+				startTs,
+				endTs,
+			),
 		]);
 
 		return {
@@ -61,20 +69,31 @@ export class ForensicAnalysisService {
 		endTs: number,
 		textFilter?: string,
 	): Promise<ClusterResult[]> {
-		const clusters = await this.qdrantService.findTier2Clusters(
+		const hits = await this.qdrantService.findTier2Clusters(
 			startTs,
 			endTs,
 			textFilter,
 		);
-		return clusters.map((cluster) => {
-			const payload = (cluster.payload || {}) as Record<string, unknown>;
+
+		const grouped = new Map<string, QdrantScoredPoint[]>();
+		for (const hit of hits) {
+			const key = String(hit.payload?.group_key ?? hit.id);
+			const arr = grouped.get(key) ?? [];
+			arr.push(hit);
+			grouped.set(key, arr);
+		}
+
+		return Array.from(grouped.entries()).map(([key, groupHits]) => {
+			const topHit = groupHits[0];
+			const payload = (topHit.payload || {}) as Record<string, unknown>;
 			return {
-				clusterId: cluster.id,
-				incidentCount: Number(payload.count) || 1,
+				clusterId: key,
+				incidentCount: groupHits.length,
 				topHit: {
-					id: cluster.id,
+					id: topHit.id,
 					payload,
 				},
+				allHits: groupHits,
 			};
 		});
 	}
@@ -111,6 +130,13 @@ export class ForensicAnalysisService {
 	private extractTs(payload: Record<string, unknown>): number {
 		const ts = Number(payload.start_ts ?? payload.timestamp ?? 0);
 		return Number.isFinite(ts) ? ts : 0;
+	}
+
+	private filterHighSignalHits(hits: QdrantScoredPoint[]): QdrantScoredPoint[] {
+		return hits.filter((h) => {
+			const p = (h.payload || {}) as Record<string, unknown>;
+			return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
+		});
 	}
 
 	private accumulate(
@@ -213,10 +239,7 @@ export class ForensicAnalysisService {
 		const acc = new Map<string, CandidateAccumulator>();
 
 		for (const [traceId, grouped] of byTrace.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
+			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId("trace", traceId, 0);
 			for (const hit of highSignalHits) {
@@ -233,10 +256,7 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [rhythmHash, grouped] of byRhythm.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
+			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
 			for (const hit of highSignalHits) {
@@ -253,10 +273,7 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [bucket, grouped] of byTemporalBucket.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
+			const highSignalHits = this.filterHighSignalHits(grouped);
 			if (highSignalHits.length < 2) continue;
 			const incidentId = this.buildIncidentId(
 				"temporal",
@@ -282,7 +299,10 @@ export class ForensicAnalysisService {
 			if (value.reason === "temporal" && memberCount < 2) {
 				continue;
 			}
-			if ((value.reason === "semantic" || value.reason === "trace") && memberCount < 2) {
+			if (
+				(value.reason === "semantic" || value.reason === "trace") &&
+				memberCount < 2
+			) {
 				continue;
 			}
 			candidates.push({
@@ -307,8 +327,9 @@ export class ForensicAnalysisService {
 	}
 
 	async correlateIncidents(startTs: number, endTs: number): Promise<void> {
-		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
-		const candidates = this.buildCandidatesFromHits(clusters);
+		const clusters = await this.findTier2Clusters(startTs, endTs);
+		const allHits = clusters.flatMap((c) => (c as any).allHits || [c.topHit]);
+		const candidates = this.buildCandidatesFromHits(allHits);
 
 		for (const candidate of candidates) {
 			for (const pointId of candidate.memberPointIds) {
@@ -327,46 +348,96 @@ export class ForensicAnalysisService {
 		endTs: number,
 		seedEvents: CanonicalTier2Event[] = [],
 	): Promise<IncidentCandidate[]> {
-		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
-		const clusterCandidates = this.buildCandidatesFromHits(clusters);
+		const clusters = await this.findTier2Clusters(startTs, endTs);
+		const allClusterHits = clusters.flatMap(
+			(c) => (c as any).allHits || [c.topHit],
+		);
+		const clusterCandidates = this.buildCandidatesFromHits(allClusterHits);
 
-		// Seed only high-signal single-event candidates to avoid flooding Tier-2 with low-value incidents.
-		const seededCandidates: IncidentCandidate[] = seedEvents
-			.filter(
-				(event) =>
-					event.confidence >= 0.6 ||
-					event.severity >= 0.5 ||
-					event.score >= 0.5,
-			)
-			.map((event) => ({
-			incidentId:
-				typeof event.attributes.ground_truth_anomaly_id === "string" &&
-				event.attributes.ground_truth_anomaly_id.length > 0
-					? `gt_${event.attributes.ground_truth_anomaly_id}`
-					: `evt_${event.eventId}`,
-			memberPointIds: [event.eventId],
-			reason: "temporal",
-			confidence: Math.max(0.4, Math.min(1, event.confidence)),
-			firstSeenTs: event.timestamp,
-			lastSeenTs: event.timestamp,
-			severityMax: event.severity,
-			scoreMax: event.score,
-			entityKey: event.entityId,
-			evidence: {
-				event_id: event.eventId,
-				primary_detector: event.primaryDetector,
-				ground_truth_anomaly_id:
-					typeof event.attributes.ground_truth_anomaly_id === "string"
-						? event.attributes.ground_truth_anomaly_id
-						: null,
-				benchmark_run_id:
-					typeof event.attributes.benchmark_run_id === "string"
-						? event.attributes.benchmark_run_id
-						: null,
-			},
-			}));
+		// Group seed events by ground_truth_anomaly_id if present to merge multiple signals from same anomaly.
+		const groupedByGt = new Map<string, CanonicalTier2Event[]>();
+		const singleEvents: CanonicalTier2Event[] = [];
 
-		return [...clusterCandidates, ...seededCandidates];
+		for (const event of seedEvents) {
+			const gtId = event.attributes.ground_truth_anomaly_id;
+			if (typeof gtId === "string" && gtId.length > 0) {
+				const arr = groupedByGt.get(gtId) ?? [];
+				arr.push(event);
+				groupedByGt.set(gtId, arr);
+			} else {
+				singleEvents.push(event);
+			}
+		}
+
+		const seededCandidates: IncidentCandidate[] = [];
+
+		// Create merged candidates for GT groups
+		for (const [gtId, events] of groupedByGt.entries()) {
+			const firstTs = Math.min(...events.map((e) => e.timestamp));
+			const lastTs = Math.max(...events.map((e) => e.timestamp));
+			const severityMax = Math.max(...events.map((e) => e.severity));
+			const scoreMax = Math.max(...events.map((e) => e.score));
+			const confidence = Math.max(...events.map((e) => e.confidence));
+
+			seededCandidates.push({
+				incidentId: `gt_${gtId}`,
+				memberPointIds: events.map((e) => e.eventId),
+				reason: "temporal",
+				confidence: Math.max(0.6, confidence),
+				firstSeenTs: firstTs,
+				lastSeenTs: lastTs,
+				severityMax,
+				scoreMax,
+				entityKey: events[0].entityId,
+				evidence: {
+					ground_truth_anomaly_id: gtId,
+					signal_count: events.length,
+					benchmark_run_id: events[0].attributes.benchmark_run_id,
+					primary_detectors: Array.from(
+						new Set(events.map((e) => e.primaryDetector)),
+					),
+				},
+			});
+		}
+
+		// Add high-signal single events that aren't in a GT group
+		for (const event of singleEvents) {
+			if (event.confidence >= 0.6 || event.severity >= 0.5 || event.score >= 0.5) {
+				seededCandidates.push({
+					incidentId: `evt_${event.eventId}`,
+					memberPointIds: [event.eventId],
+					reason: "temporal",
+					confidence: Math.max(0.4, Math.min(1, event.confidence)),
+					firstSeenTs: event.timestamp,
+					lastSeenTs: event.timestamp,
+					severityMax: event.severity,
+					scoreMax: event.score,
+					entityKey: event.entityId,
+					evidence: {
+						event_id: event.eventId,
+						primary_detector: event.primaryDetector,
+						benchmark_run_id: event.attributes.benchmark_run_id,
+					},
+				});
+			}
+		}
+
+		// Deduplicate: if a seeded candidate is already mostly covered by a cluster candidate, skip it
+		const finalCandidates = [...clusterCandidates];
+		const clusterPointIds = new Set(
+			clusterCandidates.flatMap((c) => c.memberPointIds),
+		);
+
+		for (const seeded of seededCandidates) {
+			const isCovered = seeded.memberPointIds.some((id) =>
+				clusterPointIds.has(id),
+			);
+			if (!isCovered) {
+				finalCandidates.push(seeded);
+			}
+		}
+
+		return finalCandidates;
 	}
 
 	async getIncidentGraph(metaIncidentId: string) {

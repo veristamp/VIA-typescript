@@ -268,7 +268,7 @@ impl ThompsonBandit {
             num_arms: n,
             alphas: vec![1.0; n],
             betas: vec![1.0; n],
-            decay_factor: 0.98, // Slowly forget old history
+            decay_factor: 0.90, // Faster adaptation to performance shifts
         }
     }
 
@@ -408,7 +408,7 @@ impl AdaptiveEnsemble {
 
         Self {
             num_detectors: n,
-            performance: (0..n).map(|_| DetectorPerformance::new(100)).collect(),
+            performance: (0..n).map(|_| DetectorPerformance::new(50)).collect(),
             bandit: ThompsonBandit::new(n),
             current_weights,
             exploration_rate: exploration,
@@ -422,7 +422,7 @@ impl AdaptiveEnsemble {
 
     /// Create with default settings
     pub fn default_ensemble(detector_names: Vec<String>) -> Self {
-        Self::new(detector_names, 0.1, 100)
+        Self::new(detector_names, 0.15, 25)
     }
 
     /// Combine detector outputs into ensemble score

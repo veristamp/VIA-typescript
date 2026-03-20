@@ -11,17 +11,29 @@ export class LGTMService {
 
 	constructor(config?: Partial<LGTMConfig>) {
 		this.config = {
-			lokiUrl: config?.lokiUrl || process.env.LOKI_URL || "http://mono-auth-loki:3100",
-			tempoUrl: config?.tempoUrl || process.env.TEMPO_URL || "http://mono-auth-tempo:3200",
-			prometheusUrl: config?.prometheusUrl || process.env.PROMETHEUS_URL || "http://mono-auth-prometheus:9090",
+			lokiUrl:
+				config?.lokiUrl || process.env.LOKI_URL || "http://mono-auth-loki:3100",
+			tempoUrl:
+				config?.tempoUrl ||
+				process.env.TEMPO_URL ||
+				"http://mono-auth-tempo:3200",
+			prometheusUrl:
+				config?.prometheusUrl ||
+				process.env.PROMETHEUS_URL ||
+				"http://mono-auth-prometheus:9090",
 		};
 	}
 
 	async getTrace(traceId: string) {
 		try {
-			const response = await fetch(`${this.config.tempoUrl}/api/traces/${traceId}`);
+			const response = await fetch(
+				`${this.config.tempoUrl}/api/traces/${traceId}`,
+			);
 			if (!response.ok) {
-				logger.warn("Failed to fetch trace from Tempo", { traceId, status: response.status });
+				logger.warn("Failed to fetch trace from Tempo", {
+					traceId,
+					status: response.status,
+				});
 				return null;
 			}
 			return await response.json();
@@ -39,9 +51,14 @@ export class LGTMService {
 				end: (endTs * 1000000000).toString(),
 				limit: limit.toString(),
 			});
-			const response = await fetch(`${this.config.lokiUrl}/loki/api/v1/query_range?${params.toString()}`);
+			const response = await fetch(
+				`${this.config.lokiUrl}/loki/api/v1/query_range?${params.toString()}`,
+			);
 			if (!response.ok) {
-				logger.warn("Failed to fetch logs from Loki", { query, status: response.status });
+				logger.warn("Failed to fetch logs from Loki", {
+					query,
+					status: response.status,
+				});
 				return null;
 			}
 			return await response.json();
@@ -51,7 +68,12 @@ export class LGTMService {
 		}
 	}
 
-	async getMetrics(query: string, startTs: number, endTs: number, step = "15s") {
+	async getMetrics(
+		query: string,
+		startTs: number,
+		endTs: number,
+		step = "15s",
+	) {
 		try {
 			const params = new URLSearchParams({
 				query,
@@ -59,9 +81,14 @@ export class LGTMService {
 				end: endTs.toString(),
 				step,
 			});
-			const response = await fetch(`${this.config.prometheusUrl}/api/v1/query_range?${params.toString()}`);
+			const response = await fetch(
+				`${this.config.prometheusUrl}/api/v1/query_range?${params.toString()}`,
+			);
 			if (!response.ok) {
-				logger.warn("Failed to fetch metrics from Prometheus", { query, status: response.status });
+				logger.warn("Failed to fetch metrics from Prometheus", {
+					query,
+					status: response.status,
+				});
 				return null;
 			}
 			return await response.json();

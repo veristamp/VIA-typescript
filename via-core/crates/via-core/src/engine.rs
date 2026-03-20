@@ -112,16 +112,23 @@ impl Detector for VolumeDetectorV2 {
         };
         let smoothed_rps = self.rate_estimator.update(instant_rps);
 
+        let previous_ts = self.last_timestamp;
         self.last_timestamp = ctx.timestamp;
         self.warmup_count += 1;
 
         let (predicted, deviation) = self.hw.update(smoothed_rps);
 
-        if ctx.is_warmup || self.warmup_count < 100 {
+        if ctx.is_warmup || self.warmup_count < 50 {
             return None;
         }
 
-        let _ = self.adaptive_threshold.update(deviation.abs());
+        // LEARNING GATE: Only update threshold model if 100ms have passed
+        // This prevents the threshold from 'chasing' high-frequency anomalies like DDoS
+        let last_update_delta = ctx.timestamp.saturating_sub(previous_ts);
+        if last_update_delta > 100_000_000 {
+            let _ = self.adaptive_threshold.update(deviation.abs());
+        }
+
         let score = self.adaptive_threshold.anomaly_score(deviation.abs());
 
         let prediction_error = deviation.abs() / predicted.max(1.0);
@@ -695,7 +702,7 @@ impl Detector for DriftDetectorV2 {
     fn update(&mut self, ctx: &SignalContext) -> Option<DetectionResult> {
         self.sample_count += 1;
 
-        if self.sample_count < 100 {
+        if self.sample_count < 50 {
             return None;
         }
 
@@ -762,9 +769,9 @@ impl Default for ProfileConfig {
             max_val: 10000.0,
             hist_decay: 0.999,
             confidence_threshold: 0.5,
-            warmup_events: 100,
-            min_detector_score_for_anomaly: 0.10,
-            min_ensemble_score_for_anomaly: 0.10,
+            warmup_events: 50,
+            min_detector_score_for_anomaly: 0.05,
+            min_ensemble_score_for_anomaly: 0.05,
             use_adaptive_ensemble_threshold: true,
         }
     }

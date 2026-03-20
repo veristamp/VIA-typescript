@@ -3,6 +3,7 @@ import type {
 	UpsertTier2IncidentInput,
 } from "../../../db/registry";
 import type {
+	EvaluationMetric,
 	IncidentGraph,
 	Patch,
 	Tier1PolicyArtifact,
@@ -58,4 +59,25 @@ export interface Tier2IncidentGraphRepository {
 		confidence?: number,
 	): Promise<void>;
 	getIncidentGraph(metaIncidentId: string): Promise<IncidentGraph[]>;
+}
+
+export interface Tier2SchemaRepository {
+	getSchema(sourceName: string): Promise<unknown | undefined>;
+	saveSchema(
+		sourceName: string,
+		schemaJson: object,
+		behavioralProfile?: object,
+	): Promise<void>;
+	listSchemas(): Promise<string[]>;
+}
+
+export interface Tier2EvaluationRepository {
+	saveEvaluationMetrics(
+		timestamp: number,
+		precision: number,
+		recall: number,
+		f1Score: number,
+		scenarioName?: string,
+	): Promise<void>;
+	getLatestEvaluationMetrics(limit: number): Promise<EvaluationMetric[]>;
 }

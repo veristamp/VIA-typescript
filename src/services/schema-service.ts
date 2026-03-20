@@ -1,8 +1,6 @@
-import {
-	getSchema,
-	listSchemas as listSchemasFromDb,
-	saveSchema as saveSchemaToDb,
-} from "../db/registry";
+import { tier2SchemaRepository } from "../modules/tier2/adapters/registry-repositories";
+import type { Tier2SchemaRepository } from "../modules/tier2/ports/repositories";
+import { logger } from "../utils/logger";
 
 export interface SchemaField {
 	name: string;
@@ -50,6 +48,9 @@ export interface UnifiedSchema {
 }
 
 export class SchemaService {
+	constructor(
+		private readonly repository: Tier2SchemaRepository = tier2SchemaRepository,
+	) {}
 	async detectSchema(
 		request: DetectSchemaRequest,
 	): Promise<UnifiedSchema | null> {
@@ -116,7 +117,7 @@ export class SchemaService {
 				};
 			}
 		} catch (_error) {
-			console.error("Error parsing sample logs (JSON):", _error);
+			logger.error("Error parsing sample logs (JSON)", _error);
 		}
 
 		// Fallback to BGL regex if JSON parsing failed
@@ -156,7 +157,7 @@ export class SchemaService {
 					};
 				}
 			} catch (_error) {
-				console.error("Error parsing BGL format:", _error);
+				logger.error("Error parsing BGL format", _error);
 			}
 		}
 
@@ -176,7 +177,7 @@ export class SchemaService {
 	}
 
 	async saveSchema(schema: UnifiedSchema): Promise<UnifiedSchema> {
-		await saveSchemaToDb(
+		await this.repository.saveSchema(
 			schema.structural.sourceName,
 			{ fields: schema.structural.fields },
 			schema.behavioral || undefined,
@@ -185,28 +186,30 @@ export class SchemaService {
 	}
 
 	async getSchema(sourceName: string): Promise<UnifiedSchema | null> {
-		const result = await getSchema(sourceName);
+		const result = await this.repository.getSchema(sourceName);
 
 		if (!result) {
 			return null;
 		}
 
 		const resultFields =
-			(result.schemaJson as { fields: SchemaField[] }).fields || [];
+			(result as { schemaJson: { fields: SchemaField[] } }).schemaJson.fields ||
+			[];
 
 		return {
 			structural: {
-				id: result.id,
-				sourceName: result.sourceName,
+				id: (result as { id: number }).id,
+				sourceName: (result as { sourceName: string }).sourceName,
 				fields: resultFields,
 			},
-			behavioral: (result.behavioralProfile as BehavioralProfile) || null,
+			behavioral:
+				(result as { behavioralProfile: BehavioralProfile | null })
+					.behavioralProfile || null,
 		};
 	}
 
 	async listSchemas(): Promise<string[]> {
-		const result = await listSchemasFromDb();
-		return result;
+		return this.repository.listSchemas();
 	}
 
 	async detectBehavioralProfile(
@@ -236,7 +239,7 @@ export class SchemaService {
 				const uniqueValues = new Set(values);
 				cardinality[key] = (cardinality[key] || 0) + uniqueValues.size;
 			} catch {
-				console.error("Error parsing log for behavioral profile:", log);
+				logger.error("Error parsing log for behavioral profile", { log });
 			}
 		}
 

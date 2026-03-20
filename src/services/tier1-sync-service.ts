@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import type { Tier1PolicySnapshot } from "../types";
 import { logger } from "../utils/logger";
 
@@ -15,24 +16,20 @@ export interface Tier1FeedbackEvent {
 }
 
 export class Tier1SyncService {
-	private readonly baseUrl: string | null;
+	private readonly baseUrl: string;
 
 	constructor() {
-		const configured = process.env.TIER1_BASE_URL?.trim();
-		this.baseUrl =
-			configured && configured.length > 0
-				? configured.replace(/\/$/, "")
-				: null;
+		this.baseUrl = settings.tier1.baseUrl.replace(/\/$/, "");
 	}
 
 	isEnabled(): boolean {
-		return this.baseUrl !== null;
+		return this.baseUrl.length > 0;
 	}
 
-	private async post(path: string, body: Record<string, unknown>): Promise<void> {
-		if (!this.baseUrl) {
-			return;
-		}
+	private async post(
+		path: string,
+		body: Record<string, unknown>,
+	): Promise<void> {
 		const response = await fetch(`${this.baseUrl}${path}`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -45,12 +42,15 @@ export class Tier1SyncService {
 	}
 
 	async sendFeedback(events: Tier1FeedbackEvent[]): Promise<void> {
-		if (!this.baseUrl || events.length === 0) {
+		if (!this.isEnabled() || events.length === 0) {
 			return;
 		}
 		for (const event of events) {
 			try {
-				await this.post("/feedback", event as unknown as Record<string, unknown>);
+				await this.post(
+					"/feedback",
+					event as unknown as Record<string, unknown>,
+				);
 			} catch (error) {
 				logger.warn("Failed to send feedback to Tier1", {
 					error: String(error),
@@ -61,7 +61,7 @@ export class Tier1SyncService {
 	}
 
 	async pushPolicySnapshot(snapshot: Tier1PolicySnapshot): Promise<void> {
-		if (!this.baseUrl) {
+		if (!this.isEnabled()) {
 			return;
 		}
 		await this.post(
@@ -70,4 +70,3 @@ export class Tier1SyncService {
 		);
 	}
 }
-

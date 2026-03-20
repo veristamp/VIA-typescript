@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type {
+	Tier2DeadLetterRepository,
 	Tier2IncidentRepository,
 } from "../../../src/modules/tier2/ports/repositories";
 import { IncidentService } from "../../../src/services/incident-service";
+import type { Tier1SyncService } from "../../../src/services/tier1-sync-service";
 import type { IncidentCandidate } from "../../../src/types";
 
 function candidate(overrides: Partial<IncidentCandidate>): IncidentCandidate {
@@ -66,10 +68,25 @@ function createRepo(): Tier2IncidentRepository & {
 	};
 }
 
+function createMockDeadLetterRepo(): Tier2DeadLetterRepository {
+	return {
+		async saveDeadLetter() {},
+		async getLatestDeadLetters() { return []; },
+	};
+}
+
+function createMockTier1Sync(): Tier1SyncService {
+	return {
+		isEnabled: () => false,
+		async sendFeedback() {},
+		async pushPolicySnapshot() {},
+	} as unknown as Tier1SyncService;
+}
+
 describe("IncidentService", () => {
 	it("persists incident decisions with normalized percentage values", async () => {
 		const repo = createRepo();
-		const service = new IncidentService(repo);
+		const service = new IncidentService(repo, createMockDeadLetterRepo(), createMockTier1Sync());
 
 		await service.applyCandidates([
 			candidate({ severityMax: 0.95, scoreMax: 0.6, confidence: 0.92 }),
@@ -84,7 +101,7 @@ describe("IncidentService", () => {
 
 	it("returns null for missing incident lookup", async () => {
 		const repo = createRepo();
-		const service = new IncidentService(repo);
+		const service = new IncidentService(repo, createMockDeadLetterRepo(), createMockTier1Sync());
 		const incident = await service.getIncident("missing");
 		expect(incident).toBeNull();
 	});

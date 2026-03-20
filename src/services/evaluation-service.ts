@@ -1,7 +1,5 @@
-import {
-	getLatestEvaluationMetrics,
-	saveEvaluationMetrics,
-} from "../db/registry";
+import { tier2EvaluationRepository } from "../modules/tier2/adapters/registry-repositories";
+import type { Tier2EvaluationRepository } from "../modules/tier2/ports/repositories";
 import { logger } from "../utils/logger";
 
 export interface GroundTruth {
@@ -19,6 +17,10 @@ export interface DetectionResult {
 export class EvaluationService {
 	private groundTruthBuffer: GroundTruth[] = [];
 	private detectionBuffer: DetectionResult[] = [];
+
+	constructor(
+		private readonly repository: Tier2EvaluationRepository = tier2EvaluationRepository,
+	) {}
 
 	recordGroundTruth(truth: GroundTruth) {
 		this.groundTruthBuffer.push(truth);
@@ -85,7 +87,7 @@ export class EvaluationService {
 				: (2 * precision * recall) / (precision + recall);
 
 		// Save to DB
-		await saveEvaluationMetrics(
+		await this.repository.saveEvaluationMetrics(
 			Math.floor(now),
 			Math.round(precision * 100),
 			Math.round(recall * 100),
@@ -101,6 +103,6 @@ export class EvaluationService {
 	}
 
 	async getHistory(limit: number = 20) {
-		return await getLatestEvaluationMetrics(limit);
+		return await this.repository.getLatestEvaluationMetrics(limit);
 	}
 }

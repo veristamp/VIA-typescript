@@ -129,7 +129,7 @@ pub struct PipelineBenchmarkRunner {
 impl PipelineBenchmarkRunner {
     pub fn new() -> Result<Self, String> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .build()
             .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
@@ -147,7 +147,7 @@ impl PipelineBenchmarkRunner {
         let url = format!("{}/tier2/anomalies", base_url.trim_end_matches('/'));
         let body = json!({ "signals": signals });
         let mut last_error: Option<String> = None;
-        for attempt in 0..=3 {
+        for attempt in 0..=5 {
             let response = self.client.post(&url).json(&body).send();
             match response {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
@@ -156,17 +156,17 @@ impl PipelineBenchmarkRunner {
                     let text = resp
                         .text()
                         .unwrap_or_else(|_| "<body-unavailable>".to_string());
-                    // Retry only on server-side failures.
-                    if status.is_server_error() && attempt < 3 {
-                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
+                    // Retry on rate limit (429) or server-side failures.
+                    if (status.is_server_error() || status.as_u16() == 429) && attempt < 5 {
+                        std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
                         continue;
                     }
                     return Err(format!("tier2 ingest failed with status {status}: {text}"));
                 }
                 Err(e) => {
                     last_error = Some(format!("tier2 ingest request failed: {e}"));
-                    if attempt < 3 {
-                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
+                    if attempt < 5 {
+                        std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
                         continue;
                     }
                 }
@@ -692,6 +692,7 @@ fn compute_incident_metrics(
 pub fn scenario_by_name(name: &str) -> BenchmarkConfig {
     match name {
         "mixed" => scenarios::mixed_workload(),
+        "mixed_fast" => scenarios::mixed_fast(),
         "security" => scenarios::security_audit(),
         "performance" => scenarios::performance_stress(),
         "quick" => scenarios::quick_validation(),

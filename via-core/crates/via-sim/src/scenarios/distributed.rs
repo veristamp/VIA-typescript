@@ -8,7 +8,7 @@
 
 use crate::core::{AnyValue, KeyValue, LogRecord};
 use crate::scenarios::traffic::create_log;
-use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_init, rng_for_tick};
+use crate::scenarios::{next_trace_and_span_ids, rng_for_init, rng_for_tick, Scenario};
 use rand::prelude::*;
 
 // ============================================================================
@@ -21,6 +21,8 @@ pub struct DDoSAttack {
     pub source_ip_count: usize,
     pub requests_per_ip: f64,
     source_ips: Vec<String>,
+    /// Deterministic trace ID per source IP for entity continuity
+    ip_trace_ids: Vec<String>,
 }
 
 impl DDoSAttack {
@@ -38,11 +40,21 @@ impl DDoSAttack {
             })
             .collect();
 
+        // Generate one deterministic trace ID per source IP
+        let trace_ids: Vec<String> = ips
+            .iter()
+            .map(|ip| {
+                let hash = xxhash_rust::xxh3::xxh3_64(ip.as_bytes());
+                format!("{:016x}", hash)
+            })
+            .collect();
+
         Self {
             target_service: target_service.to_string(),
             source_ip_count: source_ips,
             requests_per_ip,
             source_ips: ips,
+            ip_trace_ids: trace_ids,
         }
     }
 }
@@ -59,29 +71,42 @@ impl Scenario for DDoSAttack {
         let mut logs = Vec::new();
 
         for i in 0..count {
-            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
-            let source_ip = self.source_ips.choose(&mut rng).unwrap();
+            let ip_idx = (i as usize) % self.source_ip_count;
+            let source_ip = &self.source_ips[ip_idx];
+            // Use consistent trace ID per source IP for entity continuity
+            let trace_id = &self.ip_trace_ids[ip_idx];
+            let span_id = format!("{:016x}", i);
 
-            // Rate limiting kicks in
-            let (level, status, msg) = if rng.random_bool(0.7) {
-                ("WARN", 429, "Rate limit exceeded")
+            // Rate limiting kicks in - adds processing overhead (latency)
+            let (level, status, latency, msg) = if rng.random_bool(0.7) {
+                // Rate limited - server processes then rejects, adds significant overhead
+                let lat = rng.random_range(500.0..3000.0);
+                ("WARN", 429, lat, "Rate limit exceeded")
             } else if rng.random_bool(0.3) {
-                ("ERROR", 503, "Service unavailable")
+                // Overloaded - queue wait time adds extreme latency
+                let lat = rng.random_range(1000.0..5000.0);
+                ("ERROR", 503, lat, "Service unavailable")
             } else {
-                ("INFO", 200, "Request processed")
+                // Some requests still get through during DDoS but with high latency
+                let lat = rng.random_range(300.0..1500.0);
+                ("INFO", 200, lat, "Request processed")
             };
 
             logs.push(create_log(
                 level,
                 format!("{} from {}", msg, source_ip),
                 &self.target_service,
-                &trace_id,
+                trace_id,
                 &span_id,
                 current_time_ns + (i * 1_000_000),
                 vec![
                     KeyValue {
                         key: "http.status_code".to_string(),
                         value: AnyValue::int(status),
+                    },
+                    KeyValue {
+                        key: "http.duration_ms".to_string(),
+                        value: AnyValue::double(latency),
                     },
                     KeyValue {
                         key: "net.peer.ip".to_string(),
@@ -447,14 +472,27 @@ pub struct TrafficSpike {
     pub target_service: String,
     pub multiplier: f64,
     pub base_rps: f64,
+    /// Pool of user session trace IDs for entity continuity
+    user_trace_ids: Vec<String>,
 }
 
 impl TrafficSpike {
     pub fn new(service: &str, multiplier: f64, base_rps: f64) -> Self {
+        let mut rng = rng_for_init("distributed/traffic_spike");
+        // Create a pool of user sessions (more users = more realistic distribution)
+        let user_count = 50.max((multiplier * 10.0) as usize);
+        let user_trace_ids: Vec<String> = (0..user_count)
+            .map(|_| {
+                let (trace_id, _) = next_trace_and_span_ids(&mut rng);
+                trace_id
+            })
+            .collect();
+
         Self {
             target_service: service.to_string(),
             multiplier,
             base_rps,
+            user_trace_ids,
         }
     }
 }
@@ -471,7 +509,10 @@ impl Scenario for TrafficSpike {
         let mut logs = Vec::new();
 
         for i in 0..count {
-            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
+            // Assign to a user session (round-robin) for entity continuity
+            let user_idx = (i as usize) % self.user_trace_ids.len();
+            let trace_id = &self.user_trace_ids[user_idx];
+            let span_id = format!("{:016x}", i);
 
             // High latency due to load
             let latency = rng.random_range(100.0..500.0) * (1.0 + self.multiplier / 10.0);
@@ -488,7 +529,7 @@ impl Scenario for TrafficSpike {
                 level,
                 format!("Request processed in {:.0}ms", latency),
                 &self.target_service,
-                &trace_id,
+                trace_id,
                 &span_id,
                 current_time_ns + (i * 1_000_000 / count.max(1)),
                 vec![

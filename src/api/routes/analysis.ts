@@ -1,19 +1,10 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { tier2DeadLetterRepository } from "../../modules/tier2/adapters/registry-repositories";
 import type { ForensicAnalysisService } from "../../services/forensic-analysis-service";
 import type { IncidentService } from "../../services/incident-service";
 import type { Tier2QueueService } from "../../services/tier2-queue-service";
 
 const app = new Hono();
-
-declare module "hono" {
-	interface ContextVariableMap {
-		forensicAnalysisService: ForensicAnalysisService;
-		incidentService: IncidentService;
-		tier2QueueService: Tier2QueueService;
-	}
-}
 
 const FindClustersRequestSchema = z.object({
 	start_ts: z.number().int(),
@@ -161,7 +152,10 @@ app.post("/incidents/:incidentId/enrich", async (c) => {
 	const { trace_id, start_ts, end_ts } = body;
 
 	if (!incidentId || !trace_id || !start_ts || !end_ts) {
-		return c.json({ error: "incidentId, trace_id, start_ts, and end_ts are required" }, 400);
+		return c.json(
+			{ error: "incidentId, trace_id, start_ts, and end_ts are required" },
+			400,
+		);
 	}
 
 	const enrichment = await forensicAnalysisService.enrichIncident(
@@ -180,12 +174,12 @@ app.get("/pipeline/stats", (c) => {
 });
 
 app.get("/pipeline/dead-letters", async (c) => {
+	const incidentService = c.get("incidentService") as IncidentService;
 	const parsed = Number(c.req.query("limit") ?? "50");
 	const limit = Number.isFinite(parsed)
 		? Math.min(Math.max(parsed, 1), 500)
 		: 50;
-	const deadLetters =
-		await tier2DeadLetterRepository.getLatestDeadLetters(limit);
+	const deadLetters = await incidentService.getDeadLetters(limit);
 	return c.json({ dead_letters: deadLetters });
 });
 

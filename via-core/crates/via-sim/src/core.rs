@@ -87,6 +87,7 @@ impl LogRecord {
     pub fn metric_value(&self) -> f64 {
         for key in &[
             "http.duration_ms",
+            "db.duration_ms",
             "latency_ms",
             "process.memory.usage",
             "process.cpu.utilization",

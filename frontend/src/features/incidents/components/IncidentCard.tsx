@@ -1,6 +1,6 @@
 import React from 'react';
 import { ExternalLink, Clock, Database, Fingerprint } from 'lucide-react';
-import { Incident } from '../types';
+import { type Incident } from '../types';
 
 interface IncidentCardProps {
   incident: Incident;

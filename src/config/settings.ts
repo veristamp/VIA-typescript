@@ -1,14 +1,14 @@
 export const settings = {
 	queue: {
-		maxSize: 10000,
-		batchSize: 100,
-		flushInterval: 1000,
-		maxWorkers: 4,
+		maxSize: 50000,
+		batchSize: 500,
+		flushInterval: 500,
+		maxWorkers: 16,
 		retryBaseDelayMs: 200,
 	},
 	embedding: {
-		batchSize: 32,
-		maxConcurrency: 1,
+		batchSize: 64,
+		maxConcurrency: 4,
 		cacheTtlSec: 900,
 		maxRetries: 2,
 	},
@@ -27,5 +27,9 @@ export const settings = {
 		host: "localhost",
 		port: 6333,
 		maxConcurrentUpserts: 1,
+	},
+	tier1: {
+		baseUrl:
+			process.env.TIER1_BASE_URL?.trim() || "http://127.0.0.1:3001",
 	},
 } as const;

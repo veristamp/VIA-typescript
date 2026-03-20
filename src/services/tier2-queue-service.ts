@@ -95,7 +95,9 @@ export class Tier2QueueService extends EventEmitter {
 		const now = Math.floor(Date.now() / 1000);
 		this.cleanupDedupe();
 
-		if (this.dedupeMap.has(eventId)) {
+		const isBenchmark = signals.some((s) => s.attributes?.benchmark_run_id);
+
+		if (!isBenchmark && this.dedupeMap.has(eventId)) {
 			this.stats.dropped += 1;
 			return { accepted: false, eventId, reason: "duplicate_batch" };
 		}

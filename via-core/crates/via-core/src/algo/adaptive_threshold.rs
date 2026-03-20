@@ -306,12 +306,12 @@ pub mod presets {
 
     /// For distribution/latency detection (conservative, 3-sigma)
     pub fn distribution_threshold() -> AdaptiveThreshold {
-        AdaptiveThreshold::ewma_sigma(100, 3.0)
+        AdaptiveThreshold::ewma_sigma(50, 3.0)
     }
 
     /// For cardinality detection (percentile-based, 95th)
     pub fn cardinality_threshold() -> AdaptiveThreshold {
-        AdaptiveThreshold::percentile(100, 0.95)
+        AdaptiveThreshold::percentile(50, 0.95)
     }
 
     /// For burst detection (MAD-based, robust to outliers)
@@ -321,7 +321,7 @@ pub mod presets {
 
     /// Conservative ensemble (all methods)
     pub fn conservative_threshold() -> AdaptiveThreshold {
-        AdaptiveThreshold::ensemble(100)
+        AdaptiveThreshold::ensemble(50)
     }
 }
 

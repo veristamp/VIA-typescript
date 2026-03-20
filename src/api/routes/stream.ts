@@ -6,12 +6,6 @@ import { logger } from "../../utils/logger";
 
 const app = new Hono();
 
-declare module "hono" {
-	interface ContextVariableMap {
-		tier2QueueService: Tier2QueueService;
-	}
-}
-
 app.post("/tier2/anomalies", async (c) => {
 	const queue = c.get("tier2QueueService") as Tier2QueueService;
 	const body = await c.req.json().catch(() => null);

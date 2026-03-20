@@ -3,12 +3,6 @@ import type { EvaluationService } from "../../services/evaluation-service";
 
 const app = new Hono();
 
-declare module "hono" {
-	interface ContextVariableMap {
-		evaluationService: EvaluationService;
-	}
-}
-
 app.get("/metrics", async (c) => {
 	const evaluationService = c.get("evaluationService") as EvaluationService;
 	const parsed = Number(c.req.query("limit") ?? "20");

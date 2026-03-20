@@ -9,6 +9,7 @@ import { settings } from "./config/settings";
 import { initializeRegistry } from "./db/registry";
 import {
 	ControlService,
+	EvaluationService,
 	ForensicAnalysisService,
 	IncidentService,
 	LGTMService,
@@ -17,7 +18,6 @@ import {
 	SchemaService,
 	Tier2QueueService,
 } from "./services";
-import { EvaluationService } from "./services/evaluation-service";
 import { Tier2Service } from "./services/tier2-service";
 import { logger } from "./utils/logger";
 
@@ -27,7 +27,10 @@ const lgtmService = new LGTMService();
 const schemaService = new SchemaService();
 const policyCompilerService = new PolicyCompilerService();
 const controlService = new ControlService(policyCompilerService);
-const forensicAnalysisService = new ForensicAnalysisService(qdrantService, lgtmService);
+const forensicAnalysisService = new ForensicAnalysisService(
+	qdrantService,
+	lgtmService,
+);
 const incidentService = new IncidentService();
 const evaluationService = new EvaluationService();
 const tier2Service = new Tier2Service(

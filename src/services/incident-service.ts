@@ -1,9 +1,18 @@
-import { tier2IncidentRepository } from "../modules/tier2/adapters/registry-repositories";
+import {
+	tier2DeadLetterRepository,
+	tier2IncidentRepository,
+} from "../modules/tier2/adapters/registry-repositories";
 import { resolveIncidentDecision } from "../modules/tier2/domain/incident-decision";
-import type { Tier2IncidentRepository } from "../modules/tier2/ports/repositories";
+import type {
+	Tier2DeadLetterRepository,
+	Tier2IncidentRepository,
+} from "../modules/tier2/ports/repositories";
 import type { IncidentCandidate, IncidentStatus } from "../types";
 import { logger } from "../utils/logger";
-import { Tier1SyncService, type Tier1FeedbackEvent } from "./tier1-sync-service";
+import {
+	type Tier1FeedbackEvent,
+	Tier1SyncService,
+} from "./tier1-sync-service";
 
 export interface IncidentDecision {
 	incidentId: string;
@@ -18,10 +27,13 @@ const POLICY_VERSION = "tier2-policy-v1";
 export class IncidentService {
 	constructor(
 		private readonly repository: Tier2IncidentRepository = tier2IncidentRepository,
+		private readonly deadLetterRepository: Tier2DeadLetterRepository = tier2DeadLetterRepository,
 		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {}
 
-	private parseEntityHashText(candidate: IncidentCandidate): string | undefined {
+	private parseEntityHashText(
+		candidate: IncidentCandidate,
+	): string | undefined {
 		const direct = candidate.entityKey.startsWith("hash:")
 			? candidate.entityKey.slice("hash:".length)
 			: "";
@@ -159,5 +171,9 @@ export class IncidentService {
 			incident,
 			decisions,
 		};
+	}
+
+	async getDeadLetters(limit: number): Promise<unknown[]> {
+		return this.deadLetterRepository.getLatestDeadLetters(limit);
 	}
 }

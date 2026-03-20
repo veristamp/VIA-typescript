@@ -35,7 +35,7 @@ export class Tier2Service {
 		}
 		// Timestamp unit detection:
 		// - nanoseconds: > 1e15 (past year 2001) or > 1e10 (typical nanosecond timestamps)
-		// - milliseconds: > 1e12 and <= 1e15 
+		// - milliseconds: > 1e12 and <= 1e15
 		// - seconds: <= 1e12
 		if (numericTs > 1e15 || (numericTs > 1e10 && numericTs <= 1e12)) {
 			return Math.floor(numericTs / 1e9);
@@ -133,7 +133,7 @@ export class Tier2Service {
 
 		await this.qdrant.ingestToTier2(events);
 
-		const timestamps = normalized.map(e => e.timestamp);
+		const timestamps = normalized.map((e) => e.timestamp);
 		const endTs = Math.max(...timestamps);
 		const startTs = Math.min(...timestamps);
 		const candidates = await this.forensic.deriveIncidentCandidates(

@@ -4,13 +4,6 @@ import type { ControlService } from "../../services/control-service";
 
 const app = new Hono();
 
-// Type definitions for Hono context
-declare module "hono" {
-	interface ContextVariableMap {
-		controlService: ControlService;
-	}
-}
-
 // Validation schemas
 const SuppressRequestSchema = z.object({
 	rhythm_hash: z.string(),
