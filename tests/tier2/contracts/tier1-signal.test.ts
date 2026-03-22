@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	Tier1V1AnomalyBatchSchema,
 	normalizeTier1Severity,
-} from "../../../src/modules/tier2/contracts/tier1-signal";
+} from "../../../src/utils/normalization";
 
 describe("Tier1 signal contract", () => {
 	it("accepts valid v1 anomaly batch payload", () => {

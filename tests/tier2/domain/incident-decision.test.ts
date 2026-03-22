@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { resolveIncidentDecision } from "../../../src/modules/tier2/domain/incident-decision";
+import { resolveIncidentDecision } from "../../../src/services/domain/incident-decision";
 import type { IncidentCandidate } from "../../../src/types";
 
 function candidate(overrides: Partial<IncidentCandidate>): IncidentCandidate {

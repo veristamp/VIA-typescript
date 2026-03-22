@@ -131,12 +131,17 @@ def start_tier2(config: EvalConfig) -> Optional[subprocess.Popen]:
     log("Starting Tier-2 (Bun)...", Colors.YELLOW)
 
     root_path = Path(__file__).parent.parent
+    log_dir = root_path / ".runlogs"
+    log_dir.mkdir(exist_ok=True)
+    
+    out_log = open(log_dir / "tier2.out.log", "w")
+    err_log = open(log_dir / "tier2.err.log", "w")
+
     try:
-        # Ensure dependencies are installed if needed, but assume they are for eval
         proc = subprocess.Popen(
             ["bun", "run", "src/main.ts"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=out_log,
+            stderr=err_log,
             text=True,
             cwd=root_path,
             env={**os.environ, "LOG_LEVEL": "info"}

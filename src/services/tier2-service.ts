@@ -1,7 +1,7 @@
 import {
 	normalizeTier1Severity,
 	type Tier1AnomalySignalV1,
-} from "../modules/tier2/contracts/tier1-signal";
+} from "../utils/normalization";
 import type { CanonicalTier2Event } from "../types";
 import { logger } from "../utils/logger";
 import type { ForensicAnalysisService } from "./forensic-analysis-service";
@@ -58,6 +58,11 @@ export class Tier2Service {
 	}
 
 	private normalizeSignal(signal: IncomingAnomalySignal): CanonicalTier2Event {
+		logger.info("Normalizing signal", { 
+			entityHash: signal.entity_hash, 
+			detector: signal.primary_detector,
+			attrs: signal.attributes 
+		});
 		const timestamp = this.normalizeToUnixSeconds(
 			signal.timestamp,
 			signal.attributes,
@@ -104,8 +109,8 @@ export class Tier2Service {
 			const rhythmHash =
 				typeof rhythmHashRaw === "string" && rhythmHashRaw.length > 0
 					? rhythmHashRaw
-					: sig.entityHash.slice(0, 16);
-			const groupKey = `${rhythmHash}:${sig.primaryDetector}`;
+					: `det_${sig.primaryDetector}`;
+			const groupKey = rhythmHash;
 			const context = `rhythm=${rhythmHash} det=${sig.primaryDetector}`;
 			return {
 				textForEmbedding: context,

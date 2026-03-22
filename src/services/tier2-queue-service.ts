@@ -1,8 +1,7 @@
 import { EventEmitter } from "node:events";
 import { settings } from "../config/settings";
-import { tier2DeadLetterRepository } from "../modules/tier2/adapters/registry-repositories";
-import { normalizeTier1Severity } from "../modules/tier2/contracts/tier1-signal";
-import type { Tier2DeadLetterRepository } from "../modules/tier2/ports/repositories";
+import * as registry from "../db/registry";
+import { normalizeTier1Severity } from "../utils/normalization";
 import { logger } from "../utils/logger";
 import type { IncomingAnomalySignal, Tier2Service } from "./tier2-service";
 
@@ -45,7 +44,6 @@ export class Tier2QueueService extends EventEmitter {
 
 	constructor(
 		private readonly tier2Service: Tier2Service,
-		private readonly deadLetters: Tier2DeadLetterRepository = tier2DeadLetterRepository,
 	) {
 		super();
 	}
@@ -104,7 +102,7 @@ export class Tier2QueueService extends EventEmitter {
 
 		if (this.queue.length >= this.maxSize) {
 			this.stats.dropped += 1;
-			void this.deadLetters.saveDeadLetter(eventId, "queue_full", {
+			void registry.saveDeadLetter(eventId, "queue_full", {
 				signals_count: signals.length,
 			});
 			return { accepted: false, eventId, reason: "queue_full" };
@@ -209,7 +207,7 @@ export class Tier2QueueService extends EventEmitter {
 					this.stats.retried += 1;
 				} else {
 					this.stats.dlq += 1;
-					await this.deadLetters.saveDeadLetter(
+					await registry.saveDeadLetter(
 						task.eventId,
 						"processing_failed",
 						{

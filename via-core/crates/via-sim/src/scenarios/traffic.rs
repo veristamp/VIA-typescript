@@ -1,5 +1,5 @@
 use crate::core::{AnyValue, KeyValue, LogRecord};
-use crate::scenarios::{Scenario, next_trace_and_span_ids, rng_for_tick};
+use crate::scenarios::{rng_for_init, Scenario, next_trace_and_span_ids, rng_for_tick};
 use rand::prelude::*;
 use rand_distr::{Distribution, LogNormal, Normal};
 
@@ -43,10 +43,21 @@ pub fn create_log(
 pub struct NormalTraffic {
     pub logs_per_sec: f64,
     pub services: Vec<String>,
+    /// Pool of persistent user identities for behavioral consistency
+    user_pool: Vec<String>,
 }
 
 impl NormalTraffic {
     pub fn new(logs_per_sec: f64) -> Self {
+        let mut rng = rng_for_init("traffic/normal");
+        let user_count = 20; // Faster maturity for benchmarks
+        let user_pool: Vec<String> = (0..user_count)
+            .map(|_| {
+                let (trace_id, _) = next_trace_and_span_ids(&mut rng);
+                trace_id
+            })
+            .collect();
+
         Self {
             logs_per_sec,
             services: vec![
@@ -57,6 +68,7 @@ impl NormalTraffic {
                 "inventory-service".to_string(),
                 "recommendation-engine".to_string(),
             ],
+            user_pool,
         }
     }
 }
@@ -78,11 +90,19 @@ impl Scenario for NormalTraffic {
 
         for i in 0..count {
             let service = self.services.choose(&mut rng).unwrap();
-            let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
+            
+            // SOTA: Identity Persistence
+            let user_idx = (i as usize + (current_time_ns / 1_000_000) as usize) % self.user_pool.len();
+            let trace_id = &self.user_pool[user_idx];
+            let span_id = format!("{:016x}", i);
 
             // LogNormal for realistic latency tail
-            let latency_dist = LogNormal::new(4.0, 0.5).unwrap(); // ~55ms mean, but with tail
+            let latency_dist = LogNormal::new(4.0, 0.5).unwrap(); // ~55ms mean
             let latency = latency_dist.sample(&mut rng) as i64;
+
+            // Realistic response size distribution
+            let size_dist = LogNormal::new(6.0, 0.2).unwrap(); // mean ~400 bytes
+            let response_size = size_dist.sample(&mut rng) as i64;
 
             let status_code = if rng.random_bool(0.99) { 200 } else { 500 };
             let level = if status_code == 200 { "INFO" } else { "ERROR" };
@@ -99,6 +119,10 @@ impl Scenario for NormalTraffic {
                 KeyValue {
                     key: "http.duration_ms".to_string(),
                     value: AnyValue::int(latency),
+                },
+                KeyValue {
+                    key: "http.response.body.size".to_string(),
+                    value: AnyValue::int(response_size),
                 },
                 KeyValue {
                     key: "net.peer.ip".to_string(),
@@ -118,20 +142,15 @@ impl Scenario for NormalTraffic {
             }
 
             let body = format!("Request processed in {}ms", latency);
-
-            // SOTA: Distribute timestamps evenly across the tick to avoid Infinite RPS spikes
-            let log_ts = current_time_ns + (i * delta_ns / count.max(1));
-
-            // SOTA: Distribute timestamps evenly across the tick to avoid Infinite RPS spikes
-            let log_ts = current_time_ns + (i * delta_ns / count.max(1));
+            let _log_ts = current_time_ns + (i * delta_ns / count.max(1));
 
             logs.push(create_log(
                 level,
                 body,
                 service,
-                &trace_id,
+                trace_id,
                 &span_id,
-                log_ts,
+                _log_ts,
                 attrs,
             ));
         }

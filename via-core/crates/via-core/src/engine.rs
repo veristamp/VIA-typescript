@@ -124,7 +124,17 @@ impl Detector for VolumeDetectorV2 {
             return None;
         }
 
-        let score = self.adaptive_threshold.anomaly_score(instant_deviation.abs());
+        // SOTA: Acceleration Trigger
+        // If instant RPS is 10x the predicted value, bypass threshold logic and scream
+        let acceleration_multiplier = instant_rps / predicted.max(1.0);
+        let acceleration_trigger = acceleration_multiplier > 10.0 && instant_rps > 20.0;
+
+        let base_score = self.adaptive_threshold.anomaly_score(instant_deviation.abs());
+        let score = if acceleration_trigger {
+            1.0 // Maximum score for sudden massive surges
+        } else {
+            base_score
+        };
 
         // LEARNING GATE: Only update models if not anomalous
         let is_normal = score == 0.0;
@@ -775,9 +785,9 @@ impl Default for ProfileConfig {
             max_val: 100000.0,
             hist_decay: 0.999,
             confidence_threshold: 0.4,
-            warmup_events: 50,
+            warmup_events: 100,
             min_detector_score_for_anomaly: 0.05,
-            min_ensemble_score_for_anomaly: 0.35,
+            min_ensemble_score_for_anomaly: 0.55,
             use_adaptive_ensemble_threshold: true,
         }
     }
@@ -809,8 +819,8 @@ pub struct AnomalyProfile {
     last_timestamp: u64,
     frequency_ewma: EWMA,
 
-    /// Global Profiler (hash 0) for system-wide context
-    global_profiler: Option<Box<AnomalyProfile>>,
+    /// Lightweight global tracker
+    global_rps: EWMA,
     /// Global anomaly state
     is_global_stressed: bool,
 }
@@ -861,7 +871,7 @@ impl AnomalyProfile {
         // SOTA: Boost detectors good at identifying 'adversarial' or 'stealthy' patterns
         for (i, name) in ensemble.get_weights().iter().enumerate() {
             if name.0.contains("RRCF") || name.0.contains("Behavioral") {
-                ensemble.set_bias(i, 2.5);
+                ensemble.set_bias(i, 1.5);
             }
             if name.0.contains("Burst") {
                 ensemble.set_bias(i, 2.0);
@@ -886,7 +896,7 @@ impl AnomalyProfile {
             value_sum_sq: 0.0,
             last_timestamp: 0,
             frequency_ewma: EWMA::new(100.0),
-            global_profiler: None,
+            global_rps: EWMA::new(50.0),
             is_global_stressed: false,
         }
     }
@@ -928,22 +938,17 @@ impl AnomalyProfile {
         unique_id_hash: u64,
         value: f64,
     ) -> AnomalySignal {
-        // SOTA: Double-Entry Profiling
-        // 1. Process Global aggregate (hash 0) to catch macroscopic context (DDoS/Spikes)
-        // Ensure we only do this once at the top level to avoid infinite recursion
-        if unique_id_hash != 0 {
-            if self.global_profiler.is_none() {
-                // Initialize global profiler without a nested global profiler
-                let mut cfg = self.config.clone();
-                cfg.warmup_events = 20; // Faster warmup for aggregate data
-                self.global_profiler = Some(Box::new(AnomalyProfile::with_config(cfg)));
-            }
-
-            if let Some(ref mut global) = self.global_profiler {
-                // Global profiler always uses hash 0
-                let global_signal = global.process_with_hash(timestamp, 0, value);
-                // System-wide context: if aggregate volume/ensemble is screaming, the whole system is under stress
-                self.is_global_stressed = global_signal.is_anomaly && global_signal.ensemble_score > 0.4;
+        // SOTA: Lightweight Global Context
+        // Tracks total system RPS to detect macroscopic attacks (DDoS)
+        if self.last_timestamp > 0 {
+            let delta_ns = timestamp.saturating_sub(self.last_timestamp);
+            let delta_sec = delta_ns as f64 / 1_000_000_000.0;
+            if delta_sec > 0.0 {
+                let instant_rps = 1.0 / delta_sec;
+                let avg_rps = self.global_rps.update(instant_rps);
+                
+                // Stress trigger: if system RPS is 3x the normal mean, flag stress
+                self.is_global_stressed = avg_rps > 500.0 || (avg_rps > 100.0 && instant_rps > avg_rps * 3.0);
             }
         }
 
@@ -1116,7 +1121,7 @@ impl AnomalyProfile {
         // SOTA: Apply Global Stress Boost
         // If the macroscopic profiler detected a global attack (DDoS), boost individual signals
         let final_ensemble_score = if self.is_global_stressed {
-            (adjusted_score * 2.5).clamp(0.0, 1.0)
+            (adjusted_score * 1.3).clamp(0.0, 1.0)
         } else {
             adjusted_score
         };

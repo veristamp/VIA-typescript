@@ -1,12 +1,5 @@
-import {
-	tier2DeadLetterRepository,
-	tier2IncidentRepository,
-} from "../modules/tier2/adapters/registry-repositories";
-import { resolveIncidentDecision } from "../modules/tier2/domain/incident-decision";
-import type {
-	Tier2DeadLetterRepository,
-	Tier2IncidentRepository,
-} from "../modules/tier2/ports/repositories";
+import * as registry from "../db/registry";
+import { resolveIncidentDecision } from "./domain/incident-decision";
 import type { IncidentCandidate, IncidentStatus } from "../types";
 import { logger } from "../utils/logger";
 import {
@@ -26,8 +19,6 @@ const POLICY_VERSION = "tier2-policy-v1";
 
 export class IncidentService {
 	constructor(
-		private readonly repository: Tier2IncidentRepository = tier2IncidentRepository,
-		private readonly deadLetterRepository: Tier2DeadLetterRepository = tier2DeadLetterRepository,
 		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {}
 
@@ -112,7 +103,8 @@ export class IncidentService {
 		for (const candidate of candidates) {
 			const decision = this.resolveDecision(candidate);
 			const confidencePct = Math.round(decision.confidence * 100);
-			await this.repository.upsertIncident({
+			logger.info("Applying candidate", { incidentId: decision.incidentId, status: decision.status });
+			await registry.upsertTier2Incident({
 				incidentId: decision.incidentId,
 				status: decision.status,
 				entityKey: candidate.entityKey,
@@ -128,7 +120,7 @@ export class IncidentService {
 				},
 				policyVersion: decision.policyVersion,
 			});
-			await this.repository.saveDecision(
+			await registry.saveTier2Decision(
 				decision.incidentId,
 				decision.status,
 				decision.reason,
@@ -154,19 +146,19 @@ export class IncidentService {
 	}
 
 	async listIncidents(limit: number): Promise<unknown[]> {
-		return this.repository.listIncidents(limit);
+		return registry.listTier2Incidents(limit);
 	}
 
 	async listIncidentsForRun(runId: string, limit: number): Promise<unknown[]> {
-		return this.repository.listIncidentsForRun(runId, limit);
+		return registry.listTier2IncidentsForRun(runId, limit);
 	}
 
 	async getIncident(incidentId: string): Promise<unknown> {
-		const incident = await this.repository.getIncidentById(incidentId);
+		const incident = await registry.getTier2IncidentById(incidentId);
 		if (!incident) {
 			return null;
 		}
-		const decisions = await this.repository.listDecisions(incidentId, 50);
+		const decisions = await registry.listTier2Decisions(incidentId, 50);
 		return {
 			incident,
 			decisions,
@@ -174,6 +166,6 @@ export class IncidentService {
 	}
 
 	async getDeadLetters(limit: number): Promise<unknown[]> {
-		return this.deadLetterRepository.getLatestDeadLetters(limit);
+		return registry.getLatestDeadLetters(limit);
 	}
 }

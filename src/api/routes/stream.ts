@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { Tier1V1AnomalyBatchSchema } from "../../modules/tier2/contracts/tier1-signal";
+import { Tier1V1AnomalyBatchSchema } from "../../utils/normalization";
 import type { Tier2QueueService } from "../../services/tier2-queue-service";
 import { logger } from "../../utils/logger";
 

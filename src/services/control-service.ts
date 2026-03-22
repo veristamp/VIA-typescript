@@ -1,5 +1,4 @@
-import { tier2ControlRepository } from "../modules/tier2/adapters/registry-repositories";
-import type { Tier2ControlRepository } from "../modules/tier2/ports/repositories";
+import * as registry from "../db/registry";
 import type { Tier1PolicySnapshot } from "../types";
 import { logger } from "../utils/logger";
 import type {
@@ -27,7 +26,6 @@ export class ControlService {
 
 	constructor(
 		private readonly policyCompiler?: PolicyCompilerService,
-		private readonly repository: Tier2ControlRepository = tier2ControlRepository,
 		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {
 		// Tables are initialized during application bootstrap, so defer DB reads.
@@ -43,7 +41,7 @@ export class ControlService {
 	}
 
 	private async loadPatches(): Promise<void> {
-		const patches = await this.repository.getActivePatches();
+		const patches = await registry.getActivePatches();
 		this.patchRegistry = new Set(patches.map((p) => p.rhythmHash));
 		logger.info("Loaded active control patches", {
 			count: this.patchRegistry.size,
@@ -64,13 +62,13 @@ export class ControlService {
 		reason: string,
 		_contextLogs: string[],
 	): Promise<void> {
-		await this.repository.patchAnomaly(rhythmHash, reason);
+		await registry.patchAnomaly(rhythmHash, reason);
 		this.patchRegistry.add(rhythmHash);
 		logger.info("Patched anomaly", { rhythmHash, reason });
 	}
 
 	async deletePatch(rhythmHash: string): Promise<void> {
-		await this.repository.deletePatch(rhythmHash);
+		await registry.deletePatch(rhythmHash);
 		this.patchRegistry.delete(rhythmHash);
 		logger.info("Deleted patch", { rhythmHash });
 	}
@@ -96,7 +94,7 @@ export class ControlService {
 	}
 
 	async getAllRules() {
-		const patches = await this.repository.getAllRules();
+		const patches = await registry.getAllRules();
 		const suppressions: Array<{ rhythmHash: string; expiresAt: number }> = [];
 
 		// Get temporary suppressions from cache
@@ -117,10 +115,10 @@ export class ControlService {
 		if (!this.policyCompiler) {
 			throw new Error("policy compiler is not configured");
 		}
-		const incidents = await this.repository.listTier2Incidents(limit);
+		const incidents = await registry.listTier2Incidents(limit);
 		const artifact = this.policyCompiler.compile(incidents);
 
-		await this.repository.upsertTier1PolicyArtifact({
+		await registry.upsertTier1PolicyArtifact({
 			policyVersion: artifact.policyVersion,
 			status: "draft",
 			compiledJson: artifact.snapshot as unknown as Record<string, unknown>,
@@ -136,11 +134,11 @@ export class ControlService {
 	}
 
 	async publishPolicy(policyVersion: string): Promise<void> {
-		const policy = await this.repository.getTier1PolicyByVersion(policyVersion);
+		const policy = await registry.getTier1PolicyByVersion(policyVersion);
 		if (!policy) {
 			throw new Error(`policy not found: ${policyVersion}`);
 		}
-		await this.repository.activateTier1Policy(policyVersion);
+		await registry.activateTier1Policy(policyVersion);
 		try {
 			await this.tier1Sync.pushPolicySnapshot(
 				policy.compiledJson as Tier1PolicySnapshot,
@@ -156,13 +154,13 @@ export class ControlService {
 	}
 
 	async rollbackPolicy(targetVersion: string, reason: string): Promise<string> {
-		const target = await this.repository.getTier1PolicyByVersion(targetVersion);
+		const target = await registry.getTier1PolicyByVersion(targetVersion);
 		if (!target) {
 			throw new Error(`policy not found: ${targetVersion}`);
 		}
 
 		const rollbackVersion = `${targetVersion}-rollback-${Math.floor(Date.now() / 1000)}`;
-		await this.repository.upsertTier1PolicyArtifact({
+		await registry.upsertTier1PolicyArtifact({
 			policyVersion: rollbackVersion,
 			status: "active",
 			compiledJson: target.compiledJson as Record<string, unknown>,
@@ -172,7 +170,7 @@ export class ControlService {
 			},
 			rollbackOf: targetVersion,
 		});
-		await this.repository.activateTier1Policy(rollbackVersion);
+		await registry.activateTier1Policy(rollbackVersion);
 
 		logger.warn("Rolled back Tier-1 policy", {
 			fromVersion: targetVersion,
@@ -183,7 +181,7 @@ export class ControlService {
 	}
 
 	async getCurrentPolicy(): Promise<Tier1PolicySnapshot | null> {
-		const active = await this.repository.getCurrentActivePolicy();
+		const active = await registry.getCurrentActivePolicy();
 		if (!active) {
 			return null;
 		}
@@ -193,7 +191,7 @@ export class ControlService {
 	async getPolicyByVersion(
 		policyVersion: string,
 	): Promise<Tier1PolicySnapshot | null> {
-		const policy = await this.repository.getTier1PolicyByVersion(policyVersion);
+		const policy = await registry.getTier1PolicyByVersion(policyVersion);
 		if (!policy) {
 			return null;
 		}
@@ -201,6 +199,6 @@ export class ControlService {
 	}
 
 	async listPolicies(limit: number = 50) {
-		return this.repository.listTier1Policies(limit);
+		return registry.listTier1Policies(limit);
 	}
 }

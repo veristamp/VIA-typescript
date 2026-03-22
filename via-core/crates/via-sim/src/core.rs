@@ -81,16 +81,15 @@ impl LogRecord {
         self.get_attribute("service.name").and_then(|v| v.as_str())
     }
 
-    /// Extract numeric metric value for benchmarking
     pub fn metric_value(&self) -> f64 {
         for key in &[
-            "http.duration_ms",
+            "http.response.body.size",
             "db.duration_ms",
+            "http.duration_ms",
             "latency_ms",
             "process.memory.usage",
             "process.cpu.utilization",
             "http.status_code",
-            "http.response.body.size",
         ] {
             if let Some(v) = self.get_attribute(key) {
                 if let Some(n) = v.as_f64() {

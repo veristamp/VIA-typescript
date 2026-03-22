@@ -170,13 +170,17 @@ impl BehavioralProfile {
             deviations.push(0.3); // Accessing new service
         }
 
-        // Combine deviations (max for high sensitivity, sum for accumulation)
-        let score: f64 = deviations.iter().cloned().fold(0.0_f64, f64::max);
+        // Combine deviations (using average for stability)
+        let score: f64 = if deviations.is_empty() {
+            0.0
+        } else {
+            deviations.iter().cloned().sum::<f64>() / deviations.len() as f64
+        };
 
         // Update behavior score with EWMA
         self.behavior_score = 0.1 * score + 0.9 * self.behavior_score;
 
-        if score > 0.5 {
+        if score > 0.9 {
             self.anomaly_count += 1;
         }
 
@@ -300,7 +304,7 @@ impl ProfileStore {
 
         profile.update(timestamp_ns, iat_ms, payload_size, service_hash, geo_hash);
 
-        let is_anomalous = profile.is_anomalous(0.6);
+        let is_anomalous = profile.is_anomalous(0.9);
 
         (deviation, is_anomalous)
     }

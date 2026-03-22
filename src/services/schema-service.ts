@@ -1,5 +1,4 @@
-import { tier2SchemaRepository } from "../modules/tier2/adapters/registry-repositories";
-import type { Tier2SchemaRepository } from "../modules/tier2/ports/repositories";
+import * as registry from "../db/registry";
 import { logger } from "../utils/logger";
 
 export interface SchemaField {
@@ -48,9 +47,8 @@ export interface UnifiedSchema {
 }
 
 export class SchemaService {
-	constructor(
-		private readonly repository: Tier2SchemaRepository = tier2SchemaRepository,
-	) {}
+	constructor() {}
+
 	async detectSchema(
 		request: DetectSchemaRequest,
 	): Promise<UnifiedSchema | null> {
@@ -177,7 +175,7 @@ export class SchemaService {
 	}
 
 	async saveSchema(schema: UnifiedSchema): Promise<UnifiedSchema> {
-		await this.repository.saveSchema(
+		await registry.saveSchema(
 			schema.structural.sourceName,
 			{ fields: schema.structural.fields },
 			schema.behavioral || undefined,
@@ -186,7 +184,7 @@ export class SchemaService {
 	}
 
 	async getSchema(sourceName: string): Promise<UnifiedSchema | null> {
-		const result = await this.repository.getSchema(sourceName);
+		const result = await registry.getSchema(sourceName);
 
 		if (!result) {
 			return null;
@@ -209,7 +207,7 @@ export class SchemaService {
 	}
 
 	async listSchemas(): Promise<string[]> {
-		return this.repository.listSchemas();
+		return registry.listSchemas();
 	}
 
 	async detectBehavioralProfile(
