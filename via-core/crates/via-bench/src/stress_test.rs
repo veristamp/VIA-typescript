@@ -30,7 +30,7 @@ fn main() {
     for i in 0..events {
         let signal = profile.process_with_hash(
             (1000 + i) * 1_000_000,
-            (i % 1000) as u64,
+            i % 1000,
             100.0 + (i as f64 * 0.05) + ((i % 500) as f64 * 0.1),
         );
         if signal.is_anomaly {
@@ -165,7 +165,7 @@ fn main() {
         let start = Instant::now();
         profile.process_with_hash(
             (1000 + i) * 1_000_000,
-            (i % 500) as u64,
+            i % 500,
             100.0 + (i as f64 * 0.03),
         );
         latencies.push(start.elapsed().as_nanos() as u64);

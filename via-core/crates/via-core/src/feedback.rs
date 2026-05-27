@@ -319,9 +319,8 @@ pub struct FeedbackReceiver<'a> {
 impl<'a> FeedbackReceiver<'a> {
     /// Try to receive one event (non-blocking)
     pub fn try_recv(&self) -> Option<FeedbackEvent> {
-        self.receiver.try_recv().ok().map(|e| {
-            self.stats.record_processed(&e);
-            e
+        self.receiver.try_recv().ok().inspect(|e| {
+            self.stats.record_processed(e);
         })
     }
 

@@ -22,25 +22,23 @@ function incident(overrides: Partial<Tier2Incident>): Tier2Incident {
 }
 
 describe("PolicyCompilerService", () => {
-	it("builds suppress and boost rules from high-confidence incidents", () => {
+	it("builds boost rules from high-confidence Rust incident decisions", () => {
 		const compiler = new PolicyCompilerService();
 		const artifacts = compiler.compile([
-			incident({ incidentId: "inc-s", status: "suppressed" }),
 			incident({ incidentId: "inc-e", status: "escalated" }),
 			incident({ incidentId: "inc-m", status: "merged" }),
 		]);
 
-		expect(artifacts.snapshot.rules.length).toBe(3);
+		expect(artifacts.snapshot.rules.length).toBe(2);
 		expect(
-			artifacts.snapshot.rules.some((r) => r.action === "suppress"),
+			artifacts.snapshot.rules.some((r) => r.action === "boost"),
 		).toBeTrue();
-		expect(artifacts.snapshot.rules.some((r) => r.action === "boost")).toBeTrue();
 	});
 
 	it("drops low-confidence incidents from policy output", () => {
 		const compiler = new PolicyCompilerService();
 		const artifacts = compiler.compile([
-			incident({ incidentId: "inc-low", confidence: 40, status: "suppressed" }),
+			incident({ incidentId: "inc-low", confidence: 40, status: "escalated" }),
 		]);
 		expect(artifacts.snapshot.rules.length).toBe(0);
 	});
@@ -55,7 +53,7 @@ describe("PolicyCompilerService", () => {
 			}),
 			incident({
 				incidentId: "inc-unsafe",
-				status: "suppressed",
+				status: "merged",
 				entityKey: "hash:18446744073709551615",
 			}),
 		]);

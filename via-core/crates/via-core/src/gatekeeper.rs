@@ -22,8 +22,8 @@ use once_cell::sync::Lazy;
 use prometheus::{Counter, Encoder, Gauge, Histogram, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -35,6 +35,7 @@ use via_core::{
     policy::{PolicySnapshot, runtime as policy_runtime},
     registry::{ProfileRegistry, RegistryConfig},
     signal::{AnomalySignal, NUM_DETECTORS},
+    tier2::resolve_incident_decision,
 };
 
 const GATEKEEPER_VERSION: &str = "2.2.0";
@@ -152,7 +153,7 @@ pub static FEEDBACK_RECEIVED: Lazy<Counter> = Lazy::new(|| {
 // DATA TYPES
 // ============================================================================
 
-/// External API: Ingest Event (legacy simple format)
+/// External API: direct metric event.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IngestEvent {
     /// User/Entity ID
@@ -231,7 +232,7 @@ impl OTelAnyValue {
             _ => None,
         }
     }
-    
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             OTelAnyValue::StringValue(s) => Some(s),
@@ -318,6 +319,20 @@ pub struct ApiFeedbackRequest {
     pub pattern_id: Option<String>,
     #[serde(default)]
     pub feedback_latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IncidentDecisionRequest {
+    pub severity_max: f64,
+    pub score_max: f64,
+    pub member_count: usize,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncidentDecisionResponse {
+    pub status: &'static str,
+    pub confidence: f64,
 }
 
 fn default_confidence() -> f32 {
@@ -427,7 +442,7 @@ impl ShardWorker {
                     // Get or create profile
                     let profile = self
                         .registry
-                        .get_or_create(event.uid_hash, || AnomalyProfile::default());
+                        .get_or_create(event.uid_hash, AnomalyProfile::default);
 
                     // Process event and get rich signal
                     let signal = profile.process_with_hash(event.ts, event.uid_hash, event.val);
@@ -443,11 +458,10 @@ impl ShardWorker {
                         ANOMALY_TOTAL.inc();
 
                         // Forward to Tier-2 if forwarder is configured
-                        if let Some(ref forwarder) = self.forwarder {
-                            if forwarder.try_send(signal.clone()).is_err() {
+                        if let Some(ref forwarder) = self.forwarder
+                            && forwarder.try_send(signal.clone()).is_err() {
                                 warn!(shard = self.id, "Tier-2 forwarder queue full");
                             }
-                        }
 
                         // Offload serialization to persistence thread
                         let output: AnomalyOutput = signal.clone().into();
@@ -473,7 +487,7 @@ impl ShardWorker {
 
                     // Periodic stats update
                     event_counter += 1;
-                    if event_counter % 10000 == 0 {
+                    if event_counter.is_multiple_of(10000) {
                         ACTIVE_PROFILES.set(self.registry.len() as f64);
                     }
                 }
@@ -705,50 +719,62 @@ async fn ingest_batch(
     StatusCode::ACCEPTED
 }
 
-async fn ingest_otel(
-    State(state): State<AppState>,
-    Json(batch): Json<OTelLogBatch>,
-) -> StatusCode {
+async fn ingest_otel(State(state): State<AppState>, Json(batch): Json<OTelLogBatch>) -> StatusCode {
     let mut total_events = 0u64;
-    
+
     for resource_log in batch.resourceLogs {
         for scope_log in resource_log.scopeLogs {
             for record in scope_log.logRecords {
                 total_events += 1;
-                
+
                 // Extract entity ID from attributes (service.name or custom entity.id)
-                let entity_id = record.attributes.iter()
+                let entity_id = record
+                    .attributes
+                    .iter()
                     .find(|kv| kv.key == "service.name" || kv.key == "entity.id")
                     .and_then(|kv| kv.value.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                
+
                 // Extract metric value from attributes
-                let metric_value = record.attributes.iter()
-                    .find(|kv| matches!(kv.key.as_str(), 
-                        "http.duration_ms" | "latency_ms" | 
-                        "process.memory.usage" | "process.cpu.utilization" |
-                        "http.status_code" | "value"))
+                let metric_value = record
+                    .attributes
+                    .iter()
+                    .find(|kv| {
+                        matches!(
+                            kv.key.as_str(),
+                            "http.duration_ms"
+                                | "latency_ms"
+                                | "process.memory.usage"
+                                | "process.cpu.utilization"
+                                | "http.status_code"
+                                | "value"
+                        )
+                    })
                     .and_then(|kv| kv.value.as_f64())
                     .unwrap_or(0.0);
-                
+
                 // Parse timestamp
                 let timestamp_ns: u64 = record.timeUnixNano.parse().unwrap_or(0);
-                
+
                 let event = IngestEvent {
                     u: entity_id,
                     v: metric_value,
                     t: timestamp_ns,
                 };
-                
-                if state.ingest_tx.try_send(IngestPacket::Single(event)).is_err() {
+
+                if state
+                    .ingest_tx
+                    .try_send(IngestPacket::Single(event))
+                    .is_err()
+                {
                     DROPPED_INGEST_QUEUE.inc();
                     DROPPED_TOTAL.inc();
                 }
             }
         }
     }
-    
+
     INGEST_TOTAL.inc_by(total_events as f64);
     StatusCode::ACCEPTED
 }
@@ -901,6 +927,21 @@ async fn policy_rollback_handler(Json(req): Json<PolicyRollbackRequest>) -> Stat
     }
 }
 
+async fn incident_decision_handler(
+    Json(req): Json<IncidentDecisionRequest>,
+) -> Json<IncidentDecisionResponse> {
+    let decision = resolve_incident_decision(
+        req.severity_max,
+        req.score_max,
+        req.member_count,
+        req.confidence,
+    );
+    Json(IncidentDecisionResponse {
+        status: decision.status.as_str(),
+        confidence: decision.confidence,
+    })
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -952,13 +993,13 @@ async fn run() -> Result<(), String> {
     let persistence_handle = PersistenceManager::spawn(p_rx);
 
     // Tier-2 Forwarder (optional, enabled via environment variable)
-    let tier2_url = std::env::var("TIER2_URL").ok();
+    let tier2_url = std::env::var("TIER2_GRPC_URL").ok();
     let forwarder: Option<Arc<Tier2Forwarder>> = tier2_url.as_ref().map(|url| {
         let config = ForwarderConfig {
             tier2_url: url.clone(),
             ..Default::default()
         };
-        info!(tier2_url = %url, "Tier-2 forwarding enabled");
+        info!(tier2_grpc_url = %url, "Tier-2 gRPC forwarding enabled");
         Arc::new(Tier2Forwarder::new(config))
     });
 
@@ -999,6 +1040,7 @@ async fn run() -> Result<(), String> {
         .route("/ingest/batch", post(ingest_batch))
         .route("/ingest/otel", post(ingest_otel))
         .route("/feedback", post(feedback_handler))
+        .route("/incident/decision", post(incident_decision_handler))
         .route("/policy/snapshot", post(policy_snapshot_handler))
         .route("/policy/version", get(policy_version_handler))
         .route("/policy/rollback", post(policy_rollback_handler))
@@ -1020,6 +1062,7 @@ async fn run() -> Result<(), String> {
     info!(
         "  POST /feedback     - Tier-2 feedback for weight learning (accepts 'entity_id' string or 'entity_hash')"
     );
+    info!("  POST /incident/decision - Resolve Tier-2 incident status in Rust");
     info!("  POST /policy/snapshot - Install compiled Tier-2 policy snapshot");
     info!("  GET  /policy/version  - Current runtime policy version");
     info!("  POST /policy/rollback - Roll back to a previous policy version");

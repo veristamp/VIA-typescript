@@ -32,6 +32,8 @@ interface CandidateAccumulator {
 	confidence: number;
 }
 
+const TEMPORAL_BUCKET_SECONDS = 300;
+
 export class ForensicAnalysisService {
 	constructor(
 		private readonly qdrantService: QdrantService,
@@ -167,6 +169,7 @@ export class ForensicAnalysisService {
 		const byTrace = new Map<string, QdrantScoredPoint[]>();
 		const byRhythm = new Map<string, QdrantScoredPoint[]>();
 		const byTemporalBucket = new Map<string, QdrantScoredPoint[]>();
+		const temporalMinSupport = Math.max(2, Math.ceil(hits.length * 0.03));
 
 		for (const hit of hits) {
 			const payload = (hit.payload || {}) as Record<string, unknown>;
@@ -186,7 +189,7 @@ export class ForensicAnalysisService {
 			}
 
 			const ts = this.extractTs(payload);
-			const bucket = Math.floor(ts / 60);
+			const bucket = Math.floor(ts / TEMPORAL_BUCKET_SECONDS);
 			const arr = byTemporalBucket.get(String(bucket)) ?? [];
 			arr.push(hit);
 			byTemporalBucket.set(String(bucket), arr);
@@ -195,13 +198,9 @@ export class ForensicAnalysisService {
 		const acc = new Map<string, CandidateAccumulator>();
 
 		for (const [traceId, grouped] of byTrace.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
-			if (highSignalHits.length < 2) continue;
+			if (grouped.length < 2) continue;
 			const incidentId = this.buildIncidentId("trace", traceId, 0);
-			for (const hit of highSignalHits) {
+			for (const hit of grouped) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -215,13 +214,9 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [rhythmHash, grouped] of byRhythm.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
-			if (highSignalHits.length < 2) continue;
+			if (grouped.length < 2) continue;
 			const incidentId = this.buildIncidentId("semantic", rhythmHash, 0);
-			for (const hit of highSignalHits) {
+			for (const hit of grouped) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -235,17 +230,13 @@ export class ForensicAnalysisService {
 		}
 
 		for (const [bucket, grouped] of byTemporalBucket.entries()) {
-			const highSignalHits = grouped.filter(h => {
-				const p = (h.payload || {}) as Record<string, unknown>;
-				return (Number(p.score) || 0) >= 0.2 || (Number(p.severity) || 0) >= 0.2;
-			});
-			if (highSignalHits.length < 2) continue;
+			if (grouped.length < temporalMinSupport) continue;
 			const incidentId = this.buildIncidentId(
 				"temporal",
 				bucket,
-				Number(bucket) * 60,
+				Number(bucket) * TEMPORAL_BUCKET_SECONDS,
 			);
-			for (const hit of highSignalHits) {
+			for (const hit of grouped) {
 				this.accumulate(
 					acc,
 					incidentId,
@@ -264,7 +255,10 @@ export class ForensicAnalysisService {
 			if (value.reason === "temporal" && memberCount < 2) {
 				continue;
 			}
-			if ((value.reason === "semantic" || value.reason === "trace") && memberCount < 2) {
+			if (
+				(value.reason === "semantic" || value.reason === "trace") &&
+				memberCount < 2
+			) {
 				continue;
 			}
 			candidates.push({
@@ -288,6 +282,35 @@ export class ForensicAnalysisService {
 		return candidates;
 	}
 
+	private buildSeedHits(events: CanonicalTier2Event[]): QdrantScoredPoint[] {
+		return events.map((event) => {
+			const rhythmHashRaw = event.attributes.rhythm_hash;
+			const rhythmHash =
+				typeof rhythmHashRaw === "string" && rhythmHashRaw.length > 0
+					? rhythmHashRaw
+					: event.entityHash.slice(0, 16);
+			return {
+				id: event.eventId,
+				score: event.score,
+				payload: {
+					event_id: event.eventId,
+					entity_hash: event.entityHash,
+					group_key: `${rhythmHash}:${event.primaryDetector}`,
+					entity_id: event.entityId,
+					start_ts: event.timestamp,
+					timestamp: event.timestamp,
+					score: event.score,
+					severity: event.severity,
+					signal_type: event.primaryDetector,
+					detectors_fired: event.detectorsFired,
+					confidence: event.confidence,
+					detector_scores: event.detectorScores,
+					attributes: event.attributes,
+				},
+			};
+		});
+	}
+
 	async correlateIncidents(startTs: number, endTs: number): Promise<void> {
 		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
 		const candidates = this.buildCandidatesFromHits(clusters);
@@ -307,48 +330,11 @@ export class ForensicAnalysisService {
 	async deriveIncidentCandidates(
 		startTs: number,
 		endTs: number,
-		seedEvents: CanonicalTier2Event[] = [],
+		_seedEvents: CanonicalTier2Event[] = [],
 	): Promise<IncidentCandidate[]> {
 		const clusters = await this.qdrantService.findTier2Clusters(startTs, endTs);
-		const clusterCandidates = this.buildCandidatesFromHits(clusters);
-
-		// Seed only high-signal single-event candidates to avoid flooding Tier-2 with low-value incidents.
-		const seededCandidates: IncidentCandidate[] = seedEvents
-			.filter(
-				(event) =>
-					event.confidence >= 0.6 ||
-					event.severity >= 0.5 ||
-					event.score >= 0.5,
-			)
-			.map((event) => ({
-			incidentId:
-				typeof event.attributes.ground_truth_anomaly_id === "string" &&
-				event.attributes.ground_truth_anomaly_id.length > 0
-					? `gt_${event.attributes.ground_truth_anomaly_id}`
-					: `evt_${event.eventId}`,
-			memberPointIds: [event.eventId],
-			reason: "temporal",
-			confidence: Math.max(0.4, Math.min(1, event.confidence)),
-			firstSeenTs: event.timestamp,
-			lastSeenTs: event.timestamp,
-			severityMax: event.severity,
-			scoreMax: event.score,
-			entityKey: event.entityId,
-			evidence: {
-				event_id: event.eventId,
-				primary_detector: event.primaryDetector,
-				ground_truth_anomaly_id:
-					typeof event.attributes.ground_truth_anomaly_id === "string"
-						? event.attributes.ground_truth_anomaly_id
-						: null,
-				benchmark_run_id:
-					typeof event.attributes.benchmark_run_id === "string"
-						? event.attributes.benchmark_run_id
-						: null,
-			},
-			}));
-
-		return [...clusterCandidates, ...seededCandidates];
+		const seedHits = this.buildSeedHits(_seedEvents);
+		return this.buildCandidatesFromHits([...clusters, ...seedHits]);
 	}
 
 	async getIncidentGraph(metaIncidentId: string) {

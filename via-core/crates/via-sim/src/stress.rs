@@ -176,12 +176,12 @@ async fn main() {
 
 fn parse_duration(s: &str) -> u64 {
     let s = s.trim();
-    if s.ends_with("m") {
-        s[..s.len() - 1].parse::<u64>().unwrap_or(1) * 60
-    } else if s.ends_with("h") {
-        s[..s.len() - 1].parse::<u64>().unwrap_or(1) * 3600
-    } else if s.ends_with("s") {
-        s[..s.len() - 1].parse::<u64>().unwrap_or(30)
+    if let Some(stripped) = s.strip_suffix('m') {
+        stripped.parse::<u64>().unwrap_or(1) * 60
+    } else if let Some(stripped) = s.strip_suffix('h') {
+        stripped.parse::<u64>().unwrap_or(1) * 3600
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        stripped.parse::<u64>().unwrap_or(30)
     } else {
         s.parse::<u64>().unwrap_or(30)
     }

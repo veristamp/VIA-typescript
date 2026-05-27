@@ -84,7 +84,7 @@ impl SpectralResidual {
 
         // Performance: Only run full spectral analysis every N events unless it's the first window
         // This amortizes the O(N^2) cost without losing much signal
-        if self.sample_count > self.window_size as u64 && self.sample_count % 5 != 0 {
+        if self.sample_count > self.window_size as u64 && !self.sample_count.is_multiple_of(5) {
             return (0.0, false);
         }
 
@@ -190,9 +190,9 @@ impl SpectralResidual {
 
         // Apply sensitivity adjustment
         // Higher sensitivity = lower threshold for detection
-        let adjusted_score = combined * (1.0 + self.sensitivity);
+        
 
-        adjusted_score
+        combined * (1.0 + self.sensitivity)
     }
 
     /// Simple real FFT implementation using DFT
@@ -331,8 +331,8 @@ impl FftContext {
 
                     re[idx2] = re[idx1] - t_re;
                     im[idx2] = im[idx1] - t_im;
-                    re[idx1] = re[idx1] + t_re;
-                    im[idx1] = im[idx1] + t_im;
+                    re[idx1] += t_re;
+                    im[idx1] += t_im;
                 }
             }
             len <<= 1;
@@ -438,14 +438,12 @@ impl FastSpectralResidual {
         let result = self.detector.update(value);
 
         if self.detector.sample_count > self.detector.window_size as u64
-            && self.detector.sample_count % 5 == 0
+            && self.detector.sample_count.is_multiple_of(5)
             && self.detector.window.len() >= self.detector.window_size
             && self.use_fft
-        {
-            if let Some(ref ctx) = self.fft_context {
+            && let Some(ref ctx) = self.fft_context {
                 let _fft_score = self.detector.compute_spectral_residual_fft(ctx);
             }
-        }
 
         result
     }
@@ -550,11 +548,11 @@ mod tests {
             (re[0] - 8.0).abs() < 1e-10,
             "DC of constant signal should be 8.0"
         );
-        for k in 1..8 {
+        for (k, re_k) in re.iter().enumerate().take(8).skip(1) {
             assert!(
-                re[k].abs() < 1e-10,
+                re_k.abs() < 1e-10,
                 "AC of constant signal should be 0, got {} at {}",
-                re[k],
+                re_k,
                 k
             );
         }
@@ -581,7 +579,7 @@ mod tests {
         for i in 0..30 {
             let (score, _) = detector.update(100.0 + (i as f64 * 0.1));
             if i > 20 {
-                assert!(score >= 0.0 && score <= 1.0);
+                assert!((0.0..=1.0).contains(&score));
             }
         }
     }

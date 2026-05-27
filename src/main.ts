@@ -4,9 +4,9 @@ import { controlRoutes } from "./api/routes/control";
 import { evaluationRoutes } from "./api/routes/evaluation";
 import { healthRoutes } from "./api/routes/health";
 import { schemaRoutes } from "./api/routes/schema";
-import { streamRoutes } from "./api/routes/stream";
 import { settings } from "./config/settings";
 import { initializeRegistry } from "./db/registry";
+import { startTier2RpcServer } from "./rpc/tier2-rpc";
 import {
 	ControlService,
 	ForensicAnalysisService,
@@ -60,7 +60,6 @@ app.route("/", healthRoutes);
 app.route("/control", controlRoutes);
 app.route("/schema", schemaRoutes);
 app.route("/analysis", analysisRoutes);
-app.route("/", streamRoutes); // /tier2/anomalies
 app.route("/evaluation", evaluationRoutes);
 
 // Initialize application
@@ -68,7 +67,6 @@ async function initialize() {
 	logger.info("Initializing VIA v2 Backend (Tier-2 Focus)");
 
 	await initializeRegistry();
-	await controlService.initialize();
 	tier2QueueService.start();
 
 	// Setup Qdrant collections
@@ -96,6 +94,7 @@ async function startServer() {
 			return new Response("internal_error", { status: 500 });
 		},
 	});
+	const rpcServer = startTier2RpcServer(tier2QueueService);
 
 	logger.info("Server running", { url: server.url.toString() });
 
@@ -103,6 +102,7 @@ async function startServer() {
 		logger.info("Shutting down gracefully", { signal });
 		tier2QueueService.stop();
 		server.stop();
+		rpcServer.close();
 		process.exit(0);
 	};
 	process.once("SIGINT", () => shutdown("SIGINT"));
@@ -117,12 +117,12 @@ startServer().catch((error) => {
 
 export {
 	app,
-	qdrantService,
-	schemaService,
 	controlService,
+	evaluationService,
 	forensicAnalysisService,
 	incidentService,
-	evaluationService,
-	tier2Service,
+	qdrantService,
+	schemaService,
 	tier2QueueService,
+	tier2Service,
 };

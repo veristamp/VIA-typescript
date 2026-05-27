@@ -297,36 +297,6 @@ impl EnhancedCUSUM {
     }
 }
 
-/// Simple CUSUM wrapper for backward compatibility
-/// Uses the enhanced implementation internally
-pub struct CUSUM {
-    inner: EnhancedCUSUM,
-}
-
-impl CUSUM {
-    pub fn new(target: f64, slack: f64, threshold: f64) -> Self {
-        Self {
-            inner: EnhancedCUSUM::new(target, slack, threshold),
-        }
-    }
-
-    pub fn update(&mut self, sample: f64) -> bool {
-        self.inner.update(sample)
-    }
-
-    pub fn reset(&mut self) {
-        self.inner.reset();
-    }
-
-    pub fn alarm(&self) -> bool {
-        self.inner.alarm
-    }
-
-    pub fn alarm_type(&self) -> i8 {
-        self.inner.alarm_type
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,27 +432,5 @@ mod tests {
             threshold_after >= cusum.threshold || threshold_before >= cusum.threshold,
             "Adaptive threshold should respect base threshold"
         );
-    }
-
-    #[test]
-    fn test_backward_compatibility() {
-        // Test that simple CUSUM wrapper works
-        let mut cusum = CUSUM::new(100.0, 0.5, 4.0);
-
-        // Warm up
-        for _ in 0..20 {
-            cusum.update(100.0);
-        }
-
-        // Should detect shift
-        let mut detected = false;
-        for _ in 0..10 {
-            if cusum.update(120.0) {
-                detected = true;
-                break;
-            }
-        }
-
-        assert!(detected, "Backward compatible CUSUM should work");
     }
 }

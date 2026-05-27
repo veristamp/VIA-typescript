@@ -4,7 +4,6 @@ import type {
 } from "../../../db/registry";
 import type {
 	IncidentGraph,
-	Patch,
 	Tier1PolicyArtifact,
 	Tier2DeadLetter,
 	Tier2Decision,
@@ -27,10 +26,6 @@ export interface Tier2IncidentRepository {
 }
 
 export interface Tier2ControlRepository {
-	getActivePatches(): Promise<Patch[]>;
-	patchAnomaly(rhythmHash: string, reason: string): Promise<void>;
-	deletePatch(rhythmHash: string): Promise<void>;
-	getAllRules(): Promise<Patch[]>;
 	listTier2Incidents(limit: number): Promise<Tier2Incident[]>;
 	upsertTier1PolicyArtifact(input: UpsertPolicyArtifactInput): Promise<void>;
 	activateTier1Policy(policyVersion: string): Promise<void>;

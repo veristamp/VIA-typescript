@@ -6,9 +6,9 @@ const baseSignal = {
 	event_id: "evt-1",
 	schema_version: 1,
 	entity_hash: "1234",
-	timestamp: 1_738_000_000_000_000_000,
+	timestamp: 1_738_000_000,
 	score: 0.92,
-	severity: 1,
+	severity: 0.25,
 	primary_detector: 2,
 	detectors_fired: 4,
 	confidence: 0.88,
@@ -17,15 +17,17 @@ const baseSignal = {
 };
 
 describe("Tier2Service", () => {
-	it("normalizes Tier-1 severity before persistence and incident seeding", async () => {
+	it("persists Rust-canonical signal values without TypeScript renormalization", async () => {
 		let capturedPayloadSeverity = -1;
 		let capturedSeedSeverity = -1;
+		let capturedTimestamp = -1;
 
 		const qdrant = {
 			ingestToTier2: async (
 				events: Array<{ payload: Record<string, unknown> }>,
 			) => {
 				capturedPayloadSeverity = Number(events[0]?.payload.severity ?? -1);
+				capturedTimestamp = Number(events[0]?.payload.timestamp ?? -1);
 			},
 		};
 		const forensic = {
@@ -47,31 +49,40 @@ describe("Tier2Service", () => {
 			forensic as never,
 			incidents as never,
 		);
-		await service.processAnomalyBatch([{ ...baseSignal, severity: 4 }]);
+		await service.processAnomalyBatch([
+			{ ...baseSignal, severity: 0.75, timestamp: 1_738_000_001 },
+		]);
 
-		expect(capturedPayloadSeverity).toBe(1);
-		expect(capturedSeedSeverity).toBe(1);
+		expect(capturedPayloadSeverity).toBe(0.75);
+		expect(capturedSeedSeverity).toBe(0.75);
+		expect(capturedTimestamp).toBe(1_738_000_001);
 	});
 });
 
 describe("Tier2QueueService", () => {
-	it("keeps low Tier-1 severity batches in normal priority after normalization", () => {
+	it("keeps low-severity canonical batches in normal priority", () => {
 		const queue = new Tier2QueueService({
 			deriveBatchEventId: () => "evt-low",
 		} as never);
 
-		const result = queue.enqueue([{ ...baseSignal, severity: 1 }]);
+		const result = queue.enqueue([{ ...baseSignal, severity: 0.25 }]);
 		expect(result.accepted).toBeTrue();
-		expect((queue as any).queue[0].priority).toBe("normal");
+		expect(
+			(queue as unknown as { queue: Array<{ priority: string }> }).queue[0]
+				.priority,
+		).toBe("normal");
 	});
 
-	it("marks only critical Tier-1 severity as critical priority", () => {
+	it("marks critical canonical severity as critical priority", () => {
 		const queue = new Tier2QueueService({
 			deriveBatchEventId: () => "evt-high",
 		} as never);
 
-		const result = queue.enqueue([{ ...baseSignal, severity: 4 }]);
+		const result = queue.enqueue([{ ...baseSignal, severity: 1 }]);
 		expect(result.accepted).toBeTrue();
-		expect((queue as any).queue[0].priority).toBe("critical");
+		expect(
+			(queue as unknown as { queue: Array<{ priority: string }> }).queue[0]
+				.priority,
+		).toBe("critical");
 	});
 });

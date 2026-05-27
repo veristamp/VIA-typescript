@@ -1,9 +1,11 @@
 import { tier2IncidentRepository } from "../modules/tier2/adapters/registry-repositories";
-import { resolveIncidentDecision } from "../modules/tier2/domain/incident-decision";
 import type { Tier2IncidentRepository } from "../modules/tier2/ports/repositories";
 import type { IncidentCandidate, IncidentStatus } from "../types";
 import { logger } from "../utils/logger";
-import { Tier1SyncService, type Tier1FeedbackEvent } from "./tier1-sync-service";
+import {
+	type Tier1FeedbackEvent,
+	Tier1SyncService,
+} from "./tier1-sync-service";
 
 export interface IncidentDecision {
 	incidentId: string;
@@ -21,7 +23,9 @@ export class IncidentService {
 		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {}
 
-	private parseEntityHashText(candidate: IncidentCandidate): string | undefined {
+	private parseEntityHashText(
+		candidate: IncidentCandidate,
+	): string | undefined {
 		const direct = candidate.entityKey.startsWith("hash:")
 			? candidate.entityKey.slice("hash:".length)
 			: "";
@@ -39,18 +43,7 @@ export class IncidentService {
 		candidate: IncidentCandidate,
 		decision: IncidentDecision,
 	): Tier1FeedbackEvent | null {
-		let wasTruePositive: boolean;
-		let labelClass: "true_positive" | "false_positive";
-		if (decision.status === "suppressed") {
-			wasTruePositive = false;
-			labelClass = "false_positive";
-		} else if (
-			decision.status === "escalated" ||
-			decision.status === "merged"
-		) {
-			wasTruePositive = true;
-			labelClass = "true_positive";
-		} else {
+		if (decision.status === "new") {
 			return null;
 		}
 
@@ -69,18 +62,25 @@ export class IncidentService {
 			entity_hash_text: this.parseEntityHashText(candidate),
 			entity_id: candidate.entityKey,
 			signal_timestamp: candidate.lastSeenTs,
-			was_true_positive: wasTruePositive,
+			was_true_positive: true,
 			detector_scores: detectorScores,
 			source: "tier2_auto",
 			confidence: decision.confidence,
-			label_class: labelClass,
+			label_class: "true_positive",
 			pattern_id: candidate.incidentId,
 			feedback_latency_ms: latencyMs,
 		};
 	}
 
-	private resolveDecision(candidate: IncidentCandidate): IncidentDecision {
-		const resolved = resolveIncidentDecision(candidate);
+	private async resolveDecision(
+		candidate: IncidentCandidate,
+	): Promise<IncidentDecision> {
+		const resolved = await this.tier1Sync.resolveIncidentDecision({
+			severity_max: candidate.severityMax,
+			score_max: candidate.scoreMax,
+			member_count: candidate.memberPointIds.length,
+			confidence: candidate.confidence,
+		});
 
 		return {
 			incidentId: candidate.incidentId,
@@ -91,6 +91,35 @@ export class IncidentService {
 		};
 	}
 
+	private asStringArray(value: unknown): string[] {
+		if (!Array.isArray(value)) {
+			return [];
+		}
+		return value
+			.map((item) => (typeof item === "string" ? item : null))
+			.filter((item): item is string => item !== null);
+	}
+
+	private mergeEvidence(
+		current: Record<string, unknown>,
+		next: Record<string, unknown>,
+	): Record<string, unknown> {
+		const merged = { ...current, ...next };
+		for (const key of [
+			"member_point_ids",
+			"ground_truth_anomaly_ids",
+			"benchmark_run_ids",
+		]) {
+			merged[key] = Array.from(
+				new Set([
+					...this.asStringArray(current[key]),
+					...this.asStringArray(next[key]),
+				]),
+			);
+		}
+		return merged;
+	}
+
 	async applyCandidates(
 		candidates: IncidentCandidate[],
 	): Promise<IncidentDecision[]> {
@@ -98,22 +127,42 @@ export class IncidentService {
 		const feedbackEvents: Tier1FeedbackEvent[] = [];
 
 		for (const candidate of candidates) {
-			const decision = this.resolveDecision(candidate);
+			const decision = await this.resolveDecision(candidate);
 			const confidencePct = Math.round(decision.confidence * 100);
+			const existing = await this.repository.getIncidentById(
+				decision.incidentId,
+			);
+			const existingEvidence = (existing?.evidence ?? {}) as Record<
+				string,
+				unknown
+			>;
+			const nextEvidence = {
+				...candidate.evidence,
+				member_point_ids: candidate.memberPointIds,
+				reason: candidate.reason,
+			};
 			await this.repository.upsertIncident({
 				incidentId: decision.incidentId,
 				status: decision.status,
 				entityKey: candidate.entityKey,
-				firstSeenTs: candidate.firstSeenTs,
-				lastSeenTs: candidate.lastSeenTs,
-				severityMaxPct: Math.round(candidate.severityMax * 100),
-				scoreMaxPct: Math.round(candidate.scoreMax * 100),
-				confidencePct,
-				evidence: {
-					...candidate.evidence,
-					member_point_ids: candidate.memberPointIds,
-					reason: candidate.reason,
-				},
+				firstSeenTs: Math.min(
+					existing?.firstSeenTs ?? candidate.firstSeenTs,
+					candidate.firstSeenTs,
+				),
+				lastSeenTs: Math.max(
+					existing?.lastSeenTs ?? candidate.lastSeenTs,
+					candidate.lastSeenTs,
+				),
+				severityMaxPct: Math.max(
+					existing?.severityMax ?? 0,
+					Math.round(candidate.severityMax * 100),
+				),
+				scoreMaxPct: Math.max(
+					existing?.scoreMax ?? 0,
+					Math.round(candidate.scoreMax * 100),
+				),
+				confidencePct: Math.max(existing?.confidence ?? 0, confidencePct),
+				evidence: this.mergeEvidence(existingEvidence, nextEvidence),
 				policyVersion: decision.policyVersion,
 			});
 			await this.repository.saveDecision(

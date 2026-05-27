@@ -743,11 +743,19 @@ pub struct ProfileConfig {
     pub min_val: f64,
     pub max_val: f64,
     pub hist_decay: f64,
+    /// Confidence required for the ensemble-only decision path
     pub confidence_threshold: f64,
     pub warmup_events: usize,
+    /// Minimum detector score to count toward multi-detector corroboration
     pub min_detector_score_for_anomaly: f64,
+    /// Minimum ensemble score for ensemble-only trigger (backup path, kept low)
     pub min_ensemble_score_for_anomaly: f64,
+    /// Whether adaptive ensemble threshold is used
     pub use_adaptive_ensemble_threshold: bool,
+    /// Minimum detector self-reported confidence for single-detector trust
+    pub detector_confidence_gate: f64,
+    /// Minimum number of corroborating detectors for multi-detector trigger
+    pub corroboration_min_count: usize,
 }
 
 impl Default for ProfileConfig {
@@ -761,11 +769,13 @@ impl Default for ProfileConfig {
             min_val: 0.0,
             max_val: 10000.0,
             hist_decay: 0.999,
-            confidence_threshold: 0.5,
+            confidence_threshold: 0.6,
             warmup_events: 100,
-            min_detector_score_for_anomaly: 0.10,
+            min_detector_score_for_anomaly: 0.3,
             min_ensemble_score_for_anomaly: 0.10,
             use_adaptive_ensemble_threshold: true,
+            detector_confidence_gate: 0.75,
+            corroboration_min_count: 2,
         }
     }
 }
@@ -797,12 +807,13 @@ pub struct AnomalyProfile {
     frequency_ewma: EWMA,
 }
 
-impl AnomalyProfile {
-    /// Create with default configuration
-    pub fn default() -> Self {
+impl Default for AnomalyProfile {
+    fn default() -> Self {
         Self::with_config(ProfileConfig::default())
     }
+}
 
+impl AnomalyProfile {
     /// Create with custom configuration
     pub fn with_config(config: ProfileConfig) -> Self {
         let v_volume = VolumeDetectorV2::new(
@@ -862,7 +873,8 @@ impl AnomalyProfile {
         }
     }
 
-    /// Legacy constructor for backward compatibility
+    /// Construct a profile with explicit detector parameters.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hw_alpha: f64,
         hw_beta: f64,
@@ -1067,20 +1079,52 @@ impl AnomalyProfile {
         let adjusted_confidence =
             (ensemble_confidence * policy_effect.confidence_scale).clamp(0.0, 1.0);
 
-        // Build the signal
-        let severity = Severity::from_score(adjusted_score);
+        // Evidence-class decision logic — gate on detector confidence, not raw score.
+        //
+        // Different detectors produce scores on different scales (CUSUM severity,
+        // CUSUM hyper-parameterized threshold ratio, histogram rarity count, etc.).
+        // A score of 0.15 does not mean the same thing for every algorithm.
+        //
+        // Detector SELF-REPORTED confidence is calibrated per-detector and is the
+        // better signal. We use confidence as the primary gate with three paths:
+        //
+        // 1. CONFIDENT DETECTOR: any single detector with self-confidence ≥ 0.75
+        // 2. CORROBORATION: two or more detectors agree at score ≥ 0.3
+        // 3. ENSEMBLE: ensemble score and confidence both cross floors (backup path)
+        //
+        // No single weak detector can create a standalone anomaly.
 
-        // Hybrid decision: detector floor + ensemble score floor + adaptive ensemble threshold.
-        let any_detector_fired = detector_scores
+        // Path 1: Most confident firing detector — trust detectors that trust themselves
+        let max_detector_confidence = detector_scores
             .iter()
-            .any(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly);
-        let adaptive_trigger = self.config.use_adaptive_ensemble_threshold
-            && self.ensemble.is_anomaly(adjusted_score)
+            .filter(|s| s.fired)
+            .map(|s| s.confidence as f64)
+            .fold(0.0, f64::max);
+
+        // Path 2: Multi-detector agreement
+        let corroborating_count = detector_scores
+            .iter()
+            .filter(|s| s.fired && (s.score as f64) >= self.config.min_detector_score_for_anomaly)
+            .count();
+
+        // Path 3: Ensemble backup (uses fixed dilution score + confidence)
+        let ensemble_trigger = adjusted_score >= self.config.min_ensemble_score_for_anomaly
             && adjusted_confidence >= self.config.confidence_threshold;
-        let score_floor_trigger = adjusted_score >= self.config.min_ensemble_score_for_anomaly;
 
         let is_anomaly = !policy_effect.suppress
-            && (any_detector_fired || adaptive_trigger || score_floor_trigger);
+            && (max_detector_confidence >= self.config.detector_confidence_gate
+                || corroborating_count >= self.config.corroboration_min_count
+                || ensemble_trigger);
+
+        // Severity derived from strongest evidence, not only diluted ensemble score.
+        // If the ensemble was diluted by silent detectors but a real detector fired,
+        // severity should reflect the actual evidence, not the diluted average.
+        let evidence_score = detector_scores
+            .iter()
+            .filter(|s| s.fired)
+            .map(|s| s.score as f64)
+            .fold(adjusted_score, f64::max);
+        let severity = Severity::from_score(evidence_score);
 
         AnomalySignal {
             entity_hash: unique_id_hash,
@@ -1280,8 +1324,10 @@ impl Checkpointable for AnomalyProfile {
         let checkpoint: EnsembleCheckpoint = bincode::deserialize(data)
             .map_err(|e| CheckpointError::DeserializationFailed(e.to_string()))?;
 
-        let mut profile = AnomalyProfile::default();
-        profile.event_count = checkpoint.total_samples;
+        let mut profile = AnomalyProfile {
+            event_count: checkpoint.total_samples,
+            ..Default::default()
+        };
         profile
             .ensemble
             .restore_state(
@@ -1296,50 +1342,10 @@ impl Checkpointable for AnomalyProfile {
     }
 }
 
-// ============================================================================
-// LEGACY COMPATIBILITY: AnomalyResult (deprecated, use AnomalySignal)
-// ============================================================================
-
-/// Legacy result struct for backward compatibility
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct AnomalyResult {
-    pub is_anomaly: bool,
-    pub severity: u8,
-    pub anomaly_score: f64,
-    pub signal_type: u8,
-    pub expected: f64,
-    pub actual: f64,
-    pub confidence: f64,
-}
-
-impl From<AnomalySignal> for AnomalyResult {
-    fn from(signal: AnomalySignal) -> Self {
-        Self {
-            is_anomaly: signal.is_anomaly,
-            severity: signal.severity as u8,
-            anomaly_score: signal.ensemble_score,
-            signal_type: signal.attribution.primary_detector,
-            expected: signal.baseline.avg_value as f64,
-            actual: signal.raw_value,
-            confidence: signal.confidence,
-        }
-    }
-}
-
-impl AnomalyProfile {
-    /// Legacy method returning minimal result
-    pub fn process_legacy(&mut self, timestamp: u64, unique_id: &str, value: f64) -> AnomalyResult {
-        self.process(timestamp, unique_id, value).into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{
-        PatternRule, PolicyAction, PolicyDefaults, PolicySnapshot, runtime as policy_runtime,
-    };
+    use crate::policy::{PatternRule, PolicyAction, PolicySnapshot, runtime as policy_runtime};
 
     #[test]
     fn test_profile_creation() {
@@ -1377,15 +1383,6 @@ mod tests {
         // Should detect something (distribution shift at minimum)
         // Note: Detection depends on warmup and thresholds
         assert!(signal.detector_scores[DetectorId::Distribution as usize].score > 0.0);
-    }
-
-    #[test]
-    fn test_legacy_compatibility() {
-        let mut profile = AnomalyProfile::default();
-        let result = profile.process_legacy(1000000, "user123", 100.0);
-
-        assert!(!result.is_anomaly); // Warmup period
-        assert_eq!(result.actual, 100.0);
     }
 
     #[test]

@@ -87,8 +87,8 @@ try {
 
 	Wait-HttpOk -Url "http://127.0.0.1:3000/health" -TimeoutSeconds 120 | Out-Null
 
-	# Start Tier-1 gatekeeper on :3001 forwarding to Tier-2
-	$tier1Cmd = '$env:TIER2_URL=''http://127.0.0.1:3000''; $env:GATEKEEPER_ADDR=''0.0.0.0:3001''; & ''.\target\release\gatekeeper.exe'''
+	# Start Tier-1 gatekeeper on :3001 forwarding to Tier-2 gRPC on :3002
+	$tier1Cmd = '$env:TIER2_GRPC_URL=''http://127.0.0.1:3002''; $env:GATEKEEPER_ADDR=''0.0.0.0:3001''; & ''.\target\release\gatekeeper.exe'''
 	$tier1Proc = Start-Process -FilePath "powershell" `
 		-ArgumentList @("-NoProfile", "-Command", $tier1Cmd) `
 		-WorkingDirectory (Resolve-Path "via-core").Path `

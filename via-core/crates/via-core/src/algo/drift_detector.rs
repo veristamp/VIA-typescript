@@ -265,7 +265,7 @@ pub struct KLDivergenceDetector {
 
 impl KLDivergenceDetector {
     pub fn new(num_bins: usize, min_val: f64, max_val: f64, threshold: f64) -> Self {
-        let bins = num_bins.max(10).min(1000);
+        let bins = num_bins.clamp(10, 1000);
         Self {
             reference_hist: vec![0; bins],
             current_hist: vec![0; bins],
@@ -370,6 +370,12 @@ pub struct EnsembleDriftDetector {
     drift_score: f64,
     /// Sample counter
     sample_count: u64,
+}
+
+impl Default for EnsembleDriftDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EnsembleDriftDetector {

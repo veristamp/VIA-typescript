@@ -1,7 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type {
-	Tier2IncidentRepository,
-} from "../../../src/modules/tier2/ports/repositories";
+import type { Tier2IncidentRepository } from "../../../src/modules/tier2/ports/repositories";
 import { IncidentService } from "../../../src/services/incident-service";
 import type { IncidentCandidate } from "../../../src/types";
 
@@ -69,7 +67,14 @@ function createRepo(): Tier2IncidentRepository & {
 describe("IncidentService", () => {
 	it("persists incident decisions with normalized percentage values", async () => {
 		const repo = createRepo();
-		const service = new IncidentService(repo);
+		const tier1Sync = {
+			resolveIncidentDecision: async () => ({
+				status: "escalated",
+				confidence: 0.92,
+			}),
+			sendFeedback: async () => {},
+		};
+		const service = new IncidentService(repo, tier1Sync as never);
 
 		await service.applyCandidates([
 			candidate({ severityMax: 0.95, scoreMax: 0.6, confidence: 0.92 }),
@@ -84,7 +89,7 @@ describe("IncidentService", () => {
 
 	it("returns null for missing incident lookup", async () => {
 		const repo = createRepo();
-		const service = new IncidentService(repo);
+		const service = new IncidentService(repo, {} as never);
 		const incident = await service.getIncident("missing");
 		expect(incident).toBeNull();
 	});

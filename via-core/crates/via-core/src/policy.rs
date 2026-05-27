@@ -213,23 +213,20 @@ impl IndexedPolicySnapshot {
         let indexed = self.rules.get(idx)?;
         let rule = &indexed.rule;
 
-        if let Some(det) = rule.primary_detector {
-            if det != primary_detector {
+        if let Some(det) = rule.primary_detector
+            && det != primary_detector {
                 return None;
             }
-        }
 
-        if let Some(min_conf) = rule.min_confidence {
-            if confidence < min_conf {
+        if let Some(min_conf) = rule.min_confidence
+            && confidence < min_conf {
                 return None;
             }
-        }
 
-        if let Some(expires) = indexed.expires_at {
-            if now > expires {
+        if let Some(expires) = indexed.expires_at
+            && now > expires {
                 return None;
             }
-        }
 
         let mut effect = PolicyEffect::neutral();
         match rule.action {
@@ -341,17 +338,15 @@ impl PolicyRuntime {
                 continue;
             }
 
-            if let Some(detector) = rule.primary_detector {
-                if detector != primary_detector {
+            if let Some(detector) = rule.primary_detector
+                && detector != primary_detector {
                     continue;
                 }
-            }
 
-            if let Some(min_confidence) = rule.min_confidence {
-                if confidence < min_confidence {
+            if let Some(min_confidence) = rule.min_confidence
+                && confidence < min_confidence {
                     continue;
                 }
-            }
 
             let expires_at = snapshot.created_at_unix.saturating_add(rule.ttl_sec);
             if rule.ttl_sec > 0 && snapshot.created_at_unix > 0 && now > expires_at {

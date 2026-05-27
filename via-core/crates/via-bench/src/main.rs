@@ -70,9 +70,13 @@ enum Commands {
 
     /// End-to-end pipeline benchmark (Tier-1 simulation+detect + Tier-2 correlation/evaluation)
     Pipeline {
-        /// Tier-2 base URL
+        /// Tier-2 HTTP base URL for analysis endpoints
         #[arg(long, default_value = "http://127.0.0.1:3000")]
         tier2_url: String,
+
+        /// Tier-2 gRPC URL for anomaly ingestion
+        #[arg(long, default_value = "http://127.0.0.1:3002")]
+        tier2_grpc_url: String,
 
         /// Scenario profile: quick, mixed, security, performance, throughput
         #[arg(long, default_value = "quick")]
@@ -141,12 +145,19 @@ fn main() {
         }
         Commands::Pipeline {
             tier2_url,
+            tier2_grpc_url,
             scenario,
             duration,
             send_batch,
         } => {
             run_pipeline_benchmark(
-                &tier2_url, &scenario, duration, send_batch, cli.output, seed,
+                &tier2_url,
+                &tier2_grpc_url,
+                &scenario,
+                duration,
+                send_batch,
+                cli.output,
+                seed,
             );
         }
         Commands::Compare { files, output } => {
@@ -312,6 +323,7 @@ fn run_throughput_benchmark(duration: u64, output: Option<String>, batch_size: u
 
 fn run_pipeline_benchmark(
     tier2_url: &str,
+    tier2_grpc_url: &str,
     scenario: &str,
     duration: Option<u64>,
     send_batch: usize,
@@ -326,14 +338,15 @@ fn run_pipeline_benchmark(
     let cfg = PipelineBenchmarkConfig {
         benchmark,
         tier2_base_url: tier2_url.to_string(),
+        tier2_grpc_url: tier2_grpc_url.to_string(),
         send_batch_size: send_batch.max(1),
         simulation_seed: seed,
         ..Default::default()
     };
 
     println!(
-        "Running end-to-end pipeline benchmark against {}",
-        tier2_url
+        "Running end-to-end pipeline benchmark against {} (gRPC ingest {})",
+        tier2_url, tier2_grpc_url
     );
     println!(
         "Scenario: {} | duration={}m | send_batch={} | seed={}",

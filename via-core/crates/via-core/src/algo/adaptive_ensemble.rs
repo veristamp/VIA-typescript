@@ -434,19 +434,21 @@ impl AdaptiveEnsemble {
         self.update_count += 1;
 
         // Calculate weighted ensemble score
+        // Only include detectors that actually fired (score > 0).
+        // Silent detectors with score=0 do not contribute to normalization.
         let mut weighted_score = 0.0;
         let mut total_weight = 0.0;
         let mut triggered = 0usize;
 
         for output in outputs {
-            if output.detector_id < self.num_detectors {
+            if output.detector_id < self.num_detectors && output.score > 0.0 {
                 let weight = self.current_weights[output.detector_id];
                 let weighted = output.score * weight * output.confidence;
                 weighted_score += weighted;
                 total_weight += weight * output.confidence;
-                if output.score > 0.5 {
-                    triggered += 1;
-                }
+            }
+            if output.score > 0.5 {
+                triggered += 1;
             }
         }
 
@@ -456,7 +458,7 @@ impl AdaptiveEnsemble {
             0.0
         };
 
-        // Calculate ensemble confidence
+        // Calculate ensemble confidence (only over firing detectors)
         let confidence = self.calculate_confidence(outputs, triggered);
 
         // Update score history and adaptive threshold
@@ -502,7 +504,7 @@ impl AdaptiveEnsemble {
         }
 
         // Update weights periodically
-        if self.update_count % self.update_interval as u64 == 0 {
+        if self.update_count.is_multiple_of(self.update_interval as u64) {
             self.update_weights();
         }
     }
@@ -549,32 +551,44 @@ impl AdaptiveEnsemble {
     }
 
     /// Calculate ensemble confidence
+    ///
+    /// Single-detector events: confidence is the detector's own confidence.
+    /// Multi-detector events: agreement among firing detectors boosts confidence.
     fn calculate_confidence(&self, outputs: &[DetectorOutput], triggered: usize) -> f64 {
         if outputs.is_empty() {
             return 0.0;
         }
 
-        // Agreement between detectors
-        let agreement = triggered as f64 / self.num_detectors as f64;
-
-        // Weighted average of individual confidences
-        let mut total_confidence = 0.0;
-        let mut total_weight = 0.0;
-
-        for output in outputs {
-            let weight = self.current_weights[output.detector_id];
-            total_confidence += output.confidence * weight;
-            total_weight += weight;
+        let firing_detectors: Vec<_> = outputs.iter().filter(|o| o.score > 0.0).collect();
+        let firing_count = firing_detectors.len();
+        if firing_count == 0 {
+            return 0.0;
         }
 
-        let avg_confidence = if total_weight > 0.0 {
-            total_confidence / total_weight
-        } else {
-            0.5
-        };
+        // Single-detector: trust the one detector's confidence directly.
+        // Multi-detector: blend agreement with average individual confidence.
+        
 
-        // Combine agreement and confidence
-        0.6 * agreement + 0.4 * avg_confidence
+        if firing_count == 1 {
+            firing_detectors[0].confidence
+        } else {
+            let agreement = triggered as f64 / firing_count as f64;
+
+            let mut total_confidence = 0.0;
+            let mut total_weight = 0.0;
+            for &output in &firing_detectors {
+                let weight = self.current_weights[output.detector_id];
+                total_confidence += output.confidence * weight;
+                total_weight += weight;
+            }
+            let avg_confidence = if total_weight > 0.0 {
+                total_confidence / total_weight
+            } else {
+                0.5
+            };
+
+            0.6 * agreement + 0.4 * avg_confidence
+        }
     }
 
     /// Update adaptive threshold based on score distribution
@@ -816,7 +830,7 @@ mod tests {
 
         assert!(score > 0.0, "Should have positive score");
         assert!(
-            confidence >= 0.0 && confidence <= 1.0,
+            (0.0..=1.0).contains(&confidence),
             "Confidence should be normalized"
         );
     }

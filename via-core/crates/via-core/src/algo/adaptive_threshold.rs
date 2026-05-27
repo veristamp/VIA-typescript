@@ -247,11 +247,11 @@ impl AdaptiveThreshold {
             return 0.0;
         }
 
-        let mut sorted: Vec<f64> = data.iter().copied().collect();
+        let mut sorted: Vec<f64> = data.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let n = sorted.len();
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
             sorted[n / 2]

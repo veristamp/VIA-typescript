@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package via.tier2.v1;
+
+service Tier2Service {
+  rpc SubmitAnomalyBatch(SubmitAnomalyBatchRequest) returns (SubmitAnomalyBatchResponse) {}
+}
+
+message SubmitAnomalyBatchRequest {
+  repeated Tier1Signal signals = 1;
+}
+
+message Tier1Signal {
+  string event_id = 1;
+  uint32 schema_version = 2;
+  string entity_hash = 3;
+  uint64 timestamp = 4;
+  double score = 5;
+  double severity = 6;
+  uint32 primary_detector = 7;
+  uint32 detectors_fired = 8;
+  double confidence = 9;
+  repeated float detector_scores = 10;
+  map<string, string> attributes = 11;
+}
+
+message SubmitAnomalyBatchResponse {
+  string status = 1;
+  string event_id = 2;
+  string reason = 3;
+}

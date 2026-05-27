@@ -1,16 +1,20 @@
-use crate::{calculate_metrics, scenarios, AnomalySpec, BenchmarkConfig};
+use crate::{AnomalySpec, BenchmarkConfig, calculate_metrics, scenarios};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use via_core::engine::AnomalyProfile;
+use via_core::pb::tier2::tier2_service_client::Tier2ServiceClient;
+use via_core::pb::tier2::{SubmitAnomalyBatchRequest, Tier1Signal as RpcTier1Signal};
+use via_core::{normalize_tier1_severity, normalize_to_unix_seconds};
 use via_sim::{LogRecord, SimulationEngine};
 
 #[derive(Clone, Debug)]
 pub struct PipelineBenchmarkConfig {
     pub benchmark: BenchmarkConfig,
     pub tier2_base_url: String,
+    pub tier2_grpc_url: String,
     pub send_batch_size: usize,
     pub drain_timeout_secs: u64,
     pub simulation_seed: u64,
@@ -21,6 +25,7 @@ impl Default for PipelineBenchmarkConfig {
         Self {
             benchmark: scenarios::quick_validation(),
             tier2_base_url: "http://127.0.0.1:3000".to_string(),
+            tier2_grpc_url: "http://127.0.0.1:3002".to_string(),
             send_batch_size: 256,
             drain_timeout_secs: 900,
             simulation_seed: 42,
@@ -78,13 +83,13 @@ struct Tier2Signal {
     event_id: String,
     schema_version: u16,
     entity_hash: String,
-    timestamp: String,
+    timestamp: u64,
     score: f64,
-    severity: u8,
+    severity: f64,
     primary_detector: u8,
     detectors_fired: u8,
     confidence: f64,
-    detector_scores: Vec<f64>,
+    detector_scores: Vec<f32>,
     attributes: HashMap<String, String>,
 }
 
@@ -124,6 +129,7 @@ struct ScheduledAnomalyWindow {
 pub struct PipelineBenchmarkRunner {
     profile: AnomalyProfile,
     client: Client,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl PipelineBenchmarkRunner {
@@ -136,43 +142,42 @@ impl PipelineBenchmarkRunner {
         Ok(Self {
             profile: AnomalyProfile::default(),
             client,
+            runtime: tokio::runtime::Runtime::new()
+                .map_err(|e| format!("failed to create Tokio runtime: {e}"))?,
         })
     }
 
-    fn send_batch(&self, base_url: &str, signals: &[Tier2Signal]) -> Result<(), String> {
+    fn send_batch(&self, grpc_url: &str, signals: &[Tier2Signal]) -> Result<(), String> {
         if signals.is_empty() {
             return Ok(());
         }
 
-        let url = format!("{}/tier2/anomalies", base_url.trim_end_matches('/'));
-        let body = json!({ "signals": signals });
-        let mut last_error: Option<String> = None;
-        for attempt in 0..=3 {
-            let response = self.client.post(&url).json(&body).send();
-            match response {
-                Ok(resp) if resp.status().is_success() => return Ok(()),
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp
-                        .text()
-                        .unwrap_or_else(|_| "<body-unavailable>".to_string());
-                    // Retry only on server-side failures.
-                    if status.is_server_error() && attempt < 3 {
-                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
-                        continue;
+        let request = SubmitAnomalyBatchRequest {
+            signals: signals.iter().map(RpcTier1Signal::from).collect(),
+        };
+        let grpc_url = grpc_url.to_string();
+
+        self.runtime.block_on(async move {
+            let mut last_error: Option<String> = None;
+            for attempt in 0..=3 {
+                match Tier2ServiceClient::connect(grpc_url.clone()).await {
+                    Ok(mut client) => match client.submit_anomaly_batch(request.clone()).await {
+                        Ok(_) => return Ok(()),
+                        Err(error) => {
+                            last_error = Some(format!("tier2 gRPC ingest failed: {error}"));
+                        }
+                    },
+                    Err(error) => {
+                        last_error = Some(format!("tier2 gRPC connect failed: {error}"));
                     }
-                    return Err(format!("tier2 ingest failed with status {status}: {text}"));
                 }
-                Err(e) => {
-                    last_error = Some(format!("tier2 ingest request failed: {e}"));
-                    if attempt < 3 {
-                        std::thread::sleep(Duration::from_millis(150 * (attempt + 1) as u64));
-                        continue;
-                    }
+
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_millis(150 * (attempt + 1) as u64)).await;
                 }
             }
-        }
-        Err(last_error.unwrap_or_else(|| "tier2 ingest request failed".to_string()))
+            Err(last_error.unwrap_or_else(|| "tier2 gRPC ingest failed".to_string()))
+        })
     }
 
     fn wait_for_pipeline_drain(&self, base_url: &str, timeout_secs: u64) -> Result<(), String> {
@@ -247,6 +252,7 @@ impl PipelineBenchmarkRunner {
         sorted[idx] as f64
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_log(
         &mut self,
         run_id: &str,
@@ -315,17 +321,13 @@ impl PipelineBenchmarkRunner {
             event_id,
             schema_version: 1,
             entity_hash: signal.entity_hash.to_string(),
-            timestamp: tier2_timestamp_ns.to_string(),
+            timestamp: normalize_to_unix_seconds(tier2_timestamp_ns),
             score: signal.ensemble_score,
-            severity: signal.severity as u8,
+            severity: normalize_tier1_severity(signal.severity as u8 as f64, 1),
             primary_detector: signal.attribution.primary_detector,
             detectors_fired: signal.attribution.detectors_fired,
             confidence: signal.confidence,
-            detector_scores: signal
-                .detector_scores
-                .iter()
-                .map(|s| s.score as f64)
-                .collect(),
+            detector_scores: signal.detector_scores.iter().map(|s| s.score).collect(),
             attributes,
         });
 
@@ -462,7 +464,7 @@ impl PipelineBenchmarkRunner {
                         );
 
                         if pending_signals.len() >= cfg.send_batch_size {
-                            self.send_batch(&cfg.tier2_base_url, &pending_signals)?;
+                            self.send_batch(&cfg.tier2_grpc_url, &pending_signals)?;
                             pending_signals.clear();
                         }
                     }
@@ -471,7 +473,7 @@ impl PipelineBenchmarkRunner {
         }
 
         if !pending_signals.is_empty() {
-            self.send_batch(&cfg.tier2_base_url, &pending_signals)?;
+            self.send_batch(&cfg.tier2_grpc_url, &pending_signals)?;
         }
 
         let adaptive_timeout_secs = cfg
@@ -530,6 +532,24 @@ impl PipelineBenchmarkRunner {
             },
             anomaly_breakdown,
         })
+    }
+}
+
+impl From<&Tier2Signal> for RpcTier1Signal {
+    fn from(signal: &Tier2Signal) -> Self {
+        Self {
+            event_id: signal.event_id.clone(),
+            schema_version: signal.schema_version as u32,
+            entity_hash: signal.entity_hash.clone(),
+            timestamp: signal.timestamp,
+            score: signal.score,
+            severity: signal.severity,
+            primary_detector: signal.primary_detector as u32,
+            detectors_fired: signal.detectors_fired as u32,
+            confidence: signal.confidence,
+            detector_scores: signal.detector_scores.clone(),
+            attributes: signal.attributes.clone(),
+        }
     }
 }
 

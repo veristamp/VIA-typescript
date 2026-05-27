@@ -133,7 +133,7 @@ If an anomaly is detected, the system generates a rich signal:
 {
   "entity_hash": 123456789,
   "ensemble_score": 0.82,
-  "severity": "Critical",
+  "severity": 4,
   "attribution": {
     "primary": "Spectral/FFT",
     "reason": "Sudden frequency spike detected"
@@ -141,6 +141,8 @@ If an anomaly is detected, the system generates a rich signal:
   "confidence": 0.94
 }
 ```
+
+Signals forwarded to Tier-2 use the Rust canonical contract: Unix-second timestamps, normalized `0..1` severity, and explicit `event_id`. Gatekeeper also owns the incident threshold decision endpoint at `POST /incident/decision`.
 
 ---
 

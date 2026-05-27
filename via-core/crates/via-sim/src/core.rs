@@ -92,11 +92,10 @@ impl LogRecord {
             "process.cpu.utilization",
             "http.status_code",
         ] {
-            if let Some(v) = self.get_attribute(key) {
-                if let Some(n) = v.as_f64() {
+            if let Some(v) = self.get_attribute(key)
+                && let Some(n) = v.as_f64() {
                     return n;
                 }
-            }
         }
         1.0
     }
@@ -295,8 +294,10 @@ mod tests {
             log_count: 0,
         };
 
-        let mut log = LogRecord::default();
-        log.timeUnixNano = "1500000000".to_string();
+        let mut log = LogRecord {
+            timeUnixNano: "1500000000".to_string(),
+            ..Default::default()
+        };
         assert!(gt.matches_log(&log));
 
         log.timeUnixNano = "3000000000".to_string();
@@ -312,7 +313,7 @@ mod tests {
         assert_eq!(i.as_i64(), Some(42));
         assert_eq!(i.as_f64(), Some(42.0));
 
-        let d = AnyValue::double(3.14);
-        assert_eq!(d.as_f64(), Some(3.14));
+        let d = AnyValue::double(std::f64::consts::PI);
+        assert_eq!(d.as_f64(), Some(std::f64::consts::PI));
     }
 }

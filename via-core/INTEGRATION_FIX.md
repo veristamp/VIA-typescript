@@ -4,7 +4,7 @@
 
 ### 1. New Forwarder Module (`forwarder.rs`)
 
-Created HTTP forwarding layer to send anomaly signals from Tier-1 (Rust) to Tier-2 (Bun):
+Created gRPC forwarding layer to send anomaly signals from Tier-1 (Rust) to Tier-2 (Bun):
 
 ```rust
 pub struct Tier2Forwarder {
@@ -23,13 +23,13 @@ pub struct Tier2Forwarder {
 
 **Added:**
 - `forwarder: Option<Arc<Tier2Forwarder>>` to `AppState`
-- Environment variable `TIER2_URL` to enable forwarding
+- Environment variable `TIER2_GRPC_URL` to enable forwarding
 - Forwarding in `ShardWorker.run()` when anomalies detected
 
 **Usage:**
 ```bash
 # Enable Tier-2 forwarding
-export TIER2_URL=http://localhost:3000
+export TIER2_GRPC_URL=http://localhost:3002
 ./gatekeeper
 ```
 
@@ -79,7 +79,7 @@ pub struct DetectorPriorAdjustment {
 │                    ▼                     ▼                     ▼  │
 │            ┌──────────────┐    ┌──────────────┐    ┌──────────┐ │
 │            │ JSONL Files  │    │Tier2Forwarder│    │ Feedback │ │
-│            │ (fallback)   │    │   (HTTP)     │    │ Channel  │ │
+│            │ (fallback)   │    │   (gRPC)     │    │ Channel  │ │
 │            └──────────────┘    └──────┬───────┘    └──────────┘ │
 └───────────────────────────────────────┼─────────────────────────┘
                                         │
@@ -87,8 +87,8 @@ pub struct DetectorPriorAdjustment {
 ┌──────────────────────────────────────────────────────────────────┐
 │                         TIER-2 (Bun)                             │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐        │
-│  │ /tier2/      │───▶│ Tier2Queue   │───▶│ Incident     │        │
-│  │ anomalies    │    │ Service      │    │ Service      │        │
+│  │ Tier2Service │───▶│ Tier2Queue   │───▶│ Incident     │        │
+│  │ gRPC ingest  │    │ Service      │    │ Service      │        │
 │  └──────────────┘    └──────────────┘    └──────────────┘        │
 │                              │                                   │
 │                              ▼                                   │
@@ -104,13 +104,13 @@ pub struct DetectorPriorAdjustment {
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TIER2_URL` | (disabled) | Tier-2 base URL for forwarding |
+| `TIER2_GRPC_URL` | (disabled) | Tier-2 gRPC URL for forwarding |
 
 ### Forwarder Config
 
 ```rust
 ForwarderConfig {
-    tier2_url: "http://localhost:3000",
+    tier2_url: "http://localhost:3002",
     batch_size: 100,
     flush_interval_ms: 1000,
     max_retries: 3,

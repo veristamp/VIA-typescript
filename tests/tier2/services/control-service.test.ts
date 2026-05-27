@@ -10,14 +10,6 @@ function createControlRepo(): Tier2ControlRepository & {
 	return {
 		activations: [],
 		artifacts: [],
-		async getActivePatches() {
-			return [];
-		},
-		async patchAnomaly() {},
-		async deletePatch() {},
-		async getAllRules() {
-			return [];
-		},
 		async listTier2Incidents() {
 			return [];
 		},
@@ -36,7 +28,12 @@ function createControlRepo(): Tier2ControlRepository & {
 					id: 1,
 					policyVersion: "known",
 					status: "draft",
-					compiledJson: { version: "known", created_at_unix: 1, rules: [], defaults: { score_scale: 1, confidence_scale: 1 } },
+					compiledJson: {
+						version: "known",
+						created_at_unix: 1,
+						rules: [],
+						defaults: { score_scale: 1, confidence_scale: 1 },
+					},
 					featureFlags: {},
 					rollbackOf: null,
 					createdAt: new Date(),
@@ -74,7 +71,10 @@ describe("ControlService", () => {
 
 	it("publishes known policy versions", async () => {
 		const repo = createControlRepo();
-		const service = new ControlService(undefined, repo);
+		const tier1Sync = {
+			pushPolicySnapshot: async () => {},
+		};
+		const service = new ControlService(undefined, repo, tier1Sync as never);
 		await service.publishPolicy("known");
 		expect(repo.activations).toEqual(["known"]);
 	});

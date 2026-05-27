@@ -8,109 +8,13 @@ import type {
 } from "./policy-compiler-service";
 import { Tier1SyncService } from "./tier1-sync-service";
 
-export interface SuppressRequest {
-	rhythmHash: string;
-	durationSec: number;
-}
-
-export interface PatchRequest {
-	rhythmHash: string;
-	reason: string;
-	contextLogs: string[];
-}
-
 export class ControlService {
-	private suppressionCache: Map<string, number> = new Map();
-	private patchRegistry: Set<string> = new Set();
-	private ready: Promise<void> = Promise.resolve();
-	private initialized = false;
-
 	constructor(
 		private readonly policyCompiler?: PolicyCompilerService,
 		private readonly repository: Tier2ControlRepository = tier2ControlRepository,
 		private readonly tier1Sync: Tier1SyncService = new Tier1SyncService(),
 	) {
 		// Tables are initialized during application bootstrap, so defer DB reads.
-	}
-
-	async initialize(): Promise<void> {
-		if (this.initialized) {
-			return;
-		}
-		this.ready = this.loadPatches();
-		await this.ready;
-		this.initialized = true;
-	}
-
-	private async loadPatches(): Promise<void> {
-		const patches = await this.repository.getActivePatches();
-		this.patchRegistry = new Set(patches.map((p) => p.rhythmHash));
-		logger.info("Loaded active control patches", {
-			count: this.patchRegistry.size,
-		});
-	}
-
-	async suppressAnomaly(
-		rhythmHash: string,
-		durationSec: number,
-	): Promise<void> {
-		const expiryTs = Math.floor(Date.now() / 1000) + durationSec;
-		this.suppressionCache.set(rhythmHash, expiryTs);
-		logger.info("Suppressed anomaly", { rhythmHash, durationSec, expiryTs });
-	}
-
-	async patchAnomaly(
-		rhythmHash: string,
-		reason: string,
-		_contextLogs: string[],
-	): Promise<void> {
-		await this.repository.patchAnomaly(rhythmHash, reason);
-		this.patchRegistry.add(rhythmHash);
-		logger.info("Patched anomaly", { rhythmHash, reason });
-	}
-
-	async deletePatch(rhythmHash: string): Promise<void> {
-		await this.repository.deletePatch(rhythmHash);
-		this.patchRegistry.delete(rhythmHash);
-		logger.info("Deleted patch", { rhythmHash });
-	}
-
-	async deleteSuppression(rhythmHash: string): Promise<void> {
-		this.suppressionCache.delete(rhythmHash);
-		logger.info("Deleted suppression", { rhythmHash });
-	}
-
-	isSuppressedOrPatched(rhythmHash: string): boolean {
-		// Check if permanently patched
-		if (this.patchRegistry.has(rhythmHash)) {
-			return true;
-		}
-
-		// Check if temporarily suppressed
-		const expiryTs = this.suppressionCache.get(rhythmHash);
-		if (expiryTs && Date.now() / 1000 < expiryTs) {
-			return true;
-		}
-
-		return false;
-	}
-
-	async getAllRules() {
-		const patches = await this.repository.getAllRules();
-		const suppressions: Array<{ rhythmHash: string; expiresAt: number }> = [];
-
-		// Get temporary suppressions from cache
-		const now = Math.floor(Date.now() / 1000);
-		for (const [hash, expiryTs] of this.suppressionCache.entries()) {
-			if (expiryTs > now) {
-				suppressions.push({ rhythmHash: hash, expiresAt: expiryTs });
-			}
-		}
-
-		return {
-			patches,
-			suppressions,
-		};
 	}
 
 	async compilePolicy(limit: number = 250): Promise<CompiledPolicyArtifact> {
@@ -125,11 +29,6 @@ export class ControlService {
 			status: "draft",
 			compiledJson: artifact.snapshot as unknown as Record<string, unknown>,
 			featureFlags: artifact.featureFlags,
-		});
-
-		logger.info("Compiled Tier-1 policy artifact", {
-			policyVersion: artifact.policyVersion,
-			ruleCount: artifact.snapshot.rules.length,
 		});
 
 		return artifact;
@@ -152,7 +51,6 @@ export class ControlService {
 			});
 			throw error;
 		}
-		logger.info("Published Tier-1 policy", { policyVersion });
 	}
 
 	async rollbackPolicy(targetVersion: string, reason: string): Promise<string> {
@@ -174,11 +72,6 @@ export class ControlService {
 		});
 		await this.repository.activateTier1Policy(rollbackVersion);
 
-		logger.warn("Rolled back Tier-1 policy", {
-			fromVersion: targetVersion,
-			toVersion: rollbackVersion,
-			reason,
-		});
 		return rollbackVersion;
 	}
 

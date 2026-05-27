@@ -101,12 +101,10 @@ impl Scenario for SqlInjection {
         let count = (self.attack_rps * seconds).round() as u64;
         let mut logs = Vec::new();
 
-        let payloads = vec![
-            "' OR 1=1 --",
+        let payloads = ["' OR 1=1 --",
             "UNION SELECT * FROM users",
             "admin' --",
-            "1; DROP TABLE users",
-        ];
+            "1; DROP TABLE users"];
 
         for _ in 0..count {
             let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);
@@ -156,7 +154,7 @@ impl Scenario for PortScan {
         let count = (self.scan_speed * seconds).round() as u64;
         let mut logs = Vec::new();
 
-        let ports = vec![21, 22, 23, 80, 443, 3306, 8080, 5432];
+        let ports = [21, 22, 23, 80, 443, 3306, 8080, 5432];
 
         for _ in 0..count {
             let (trace_id, span_id) = next_trace_and_span_ids(&mut rng);

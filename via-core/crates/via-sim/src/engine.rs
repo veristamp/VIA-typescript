@@ -30,19 +30,12 @@ use crate::scenarios::{self, Scenario};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct DeterminismConfig {
     pub enabled: bool,
     pub seed: u64,
 }
 
-impl Default for DeterminismConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            seed: 0,
-        }
-    }
-}
 
 /// Unified simulation engine
 pub struct SimulationEngine {

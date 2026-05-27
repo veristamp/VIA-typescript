@@ -240,7 +240,7 @@ impl ProfileStore {
     pub fn new(max_profiles: usize, maturity_threshold: u64) -> Self {
         Self {
             profiles: HashMap::with_capacity(max_profiles.min(100000)),
-            max_profiles: max_profiles.max(10).min(1000000), // Allow smaller for testing
+            max_profiles: max_profiles.clamp(10, 1000000), // Allow smaller for testing
             access_times: HashMap::with_capacity(max_profiles.min(100000)),
             access_counter: 0,
             maturity_threshold,

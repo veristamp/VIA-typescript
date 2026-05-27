@@ -259,6 +259,12 @@ pub struct MultiScaleResult {
     pub has_seasonality: bool,
 }
 
+impl Default for MultiScaleDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiScaleDetector {
     pub fn new() -> Self {
         Self {

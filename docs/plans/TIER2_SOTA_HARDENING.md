@@ -8,11 +8,10 @@ Tier-2 is now designed as an event-driven intelligence and incident-management p
 ### Phase A: Canonical Contract + Queue
 - Introduced canonical Tier-2 event model with stable `eventId`, tenant/entity semantics, and detector context.
 - Added bounded in-memory queue with:
-  - dedupe window,
   - max queue size backpressure,
   - retries (max 3 attempts),
   - dead-letter writes.
-- API now enqueues and returns accepted/rejected state with event ID.
+- gRPC ingest now enqueues and returns accepted/rejected state with event ID.
 
 ### Phase B: Correlation Engine v2
 - Replaced naive pairwise correlation path with bounded candidate generation:
@@ -44,7 +43,7 @@ Tier-2 is now designed as an event-driven intelligence and incident-management p
 - Graceful startup/shutdown includes queue lifecycle.
 
 ## Operational Endpoints
-- Ingest: `POST /tier2/anomalies`
+- Ingest: `via.tier2.v1.Tier2Service/SubmitAnomalyBatch` over gRPC on `TIER2_GRPC_PORT`
 - Incidents: `GET /analysis/incidents`
 - Incident detail: `GET /analysis/incidents/:incidentId`
 - Queue stats: `GET /analysis/pipeline/stats`

@@ -1,8 +1,8 @@
 //! Rich Signal Output for Tier-2 Consumption
 //!
 //! This module defines the comprehensive anomaly signal that Tier-1 emits.
-//! Unlike the minimal AnomalyResult, this provides full detector breakdown,
-//! SHAP-like attribution, and contextual information for Tier-2 reasoning.
+//! This provides full detector breakdown, SHAP-like attribution, and
+//! contextual information for Tier-2 reasoning.
 
 use serde::{Deserialize, Serialize};
 
@@ -347,20 +347,22 @@ impl AnomalySignalBuilder {
     pub fn finalize(mut self, ensemble_score: f64, confidence: f64) -> AnomalySignal {
         self.signal.ensemble_score = ensemble_score;
         self.signal.confidence = confidence;
-        self.signal.severity = Severity::from_score(ensemble_score);
 
-        // TIER 1 DESIGN: HIGH RECALL - Catch everything for Tier 2 to review
-        // Flag as anomaly if:
-        // 1. Any detector fired with reasonable score (>= 0.3), OR
-        // 2. Ensemble score is elevated (>= 0.2)
-        // False positives are OK here - Tier 2 filters them via API
-        let any_detector_fired = self
+        // Evidence-based severity: use the strongest firing detector or ensemble score
+        let evidence = self
             .signal
             .detector_scores
             .iter()
-            .any(|s| s.fired && s.score >= 0.3);
+            .filter(|s| s.fired)
+            .map(|s| s.score as f64)
+            .fold(ensemble_score, f64::max);
+        self.signal.severity = Severity::from_score(evidence);
 
-        self.signal.is_anomaly = any_detector_fired || ensemble_score >= 0.2;
+        // Decision: anomaly if at least one detector fired
+        // (engine.rs applies the full evidence-class gate; this builder is
+        //  consistent in that any detected signal is considered an anomaly)
+        let any_detector_fired = self.signal.detector_scores.iter().any(|s| s.fired);
+        self.signal.is_anomaly = any_detector_fired;
 
         // Compute attribution
         let weights: [f64; NUM_DETECTORS] = {

@@ -1,6 +1,5 @@
 import { settings } from "../config/settings";
 import { tier2DeadLetterRepository } from "../modules/tier2/adapters/registry-repositories";
-import { normalizeTier1Severity } from "../modules/tier2/contracts/tier1-signal";
 import type { Tier2DeadLetterRepository } from "../modules/tier2/ports/repositories";
 import { logger } from "../utils/logger";
 import type { IncomingAnomalySignal, Tier2Service } from "./tier2-service";
@@ -25,8 +24,6 @@ export interface QueueStats {
 
 export class Tier2QueueService {
 	private queue: QueueTask[] = [];
-	private readonly dedupeWindowSec = 900;
-	private readonly dedupeMap = new Map<string, number>();
 	private readonly maxSize = settings.queue.maxSize;
 	private readonly batchSize = settings.queue.batchSize;
 	private readonly maxAttempts = 3;
@@ -74,15 +71,6 @@ export class Tier2QueueService {
 		}
 	}
 
-	private cleanupDedupe(): void {
-		const now = Math.floor(Date.now() / 1000);
-		for (const [eventId, expiry] of this.dedupeMap.entries()) {
-			if (expiry <= now) {
-				this.dedupeMap.delete(eventId);
-			}
-		}
-	}
-
 	enqueue(signals: IncomingAnomalySignal[]): {
 		accepted: boolean;
 		eventId: string;
@@ -90,12 +78,6 @@ export class Tier2QueueService {
 	} {
 		const eventId = this.tier2Service.deriveBatchEventId(signals);
 		const now = Math.floor(Date.now() / 1000);
-		this.cleanupDedupe();
-
-		if (this.dedupeMap.has(eventId)) {
-			this.stats.dropped += 1;
-			return { accepted: false, eventId, reason: "duplicate_batch" };
-		}
 
 		if (this.queue.length >= this.maxSize) {
 			this.stats.dropped += 1;
@@ -113,7 +95,6 @@ export class Tier2QueueService {
 			nextAttemptAt: now,
 			priority: this.resolvePriority(signals),
 		});
-		this.dedupeMap.set(eventId, now + this.dedupeWindowSec);
 		this.stats.queued += 1;
 		return { accepted: true, eventId };
 	}
@@ -122,11 +103,7 @@ export class Tier2QueueService {
 		signals: IncomingAnomalySignal[],
 	): "critical" | "normal" {
 		const maxSeverity = signals.reduce(
-			(acc, signal) =>
-				Math.max(
-					acc,
-					normalizeTier1Severity(signal.severity, signal.schema_version),
-				),
+			(acc, signal) => Math.max(acc, signal.severity),
 			0,
 		);
 		return maxSeverity >= 0.85 ? "critical" : "normal";

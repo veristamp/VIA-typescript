@@ -101,7 +101,7 @@ curl http://127.0.0.1:3000/health
 ```bash
 # Terminal 2: Start Gatekeeper
 cd VIA-typescript/via-core
-GATEKEEPER_ADDR=0.0.0.0:3001 TIER2_URL=http://127.0.0.1:3000 \
+GATEKEEPER_ADDR=0.0.0.0:3001 TIER2_GRPC_URL=http://127.0.0.1:3002 \
   cargo run --release -p via-core --bin gatekeeper
 
 # Health check  
@@ -190,7 +190,10 @@ curl -X POST http://127.0.0.1:3001/ingest/otel \
 | GET | `/analysis/incidents` | List incidents |
 | GET | `/analysis/incidents/run/:runId` | Incidents for a specific run |
 | GET | `/analysis/pipeline/stats` | Queue statistics |
-| POST | `/tier2/anomalies` | Receive signals from Tier-1 |
+| POST | `/control/policy/compile` | Compile Tier-2 incidents into a Tier-1 policy snapshot |
+| POST | `/control/policy/publish` | Push a compiled policy snapshot to Gatekeeper |
+
+Tier-1 anomaly ingestion into Tier-2 is gRPC on `TIER2_GRPC_URL` (default `http://127.0.0.1:3002`). Gatekeeper normalizes signals before forwarding: `timestamp` is Unix seconds and `severity` is `0..1`.
 
 ---
 
@@ -289,11 +292,14 @@ VIA-typescript/
 
 **Tier-1 (Gatekeeper):**
 - `GATEKEEPER_ADDR`: Server bind address (default: `0.0.0.0:3001`)
-- `TIER2_URL`: Tier-2 endpoint for signal forwarding
+- `TIER2_GRPC_URL`: Tier-2 gRPC endpoint for signal forwarding
 
 **Tier-2:**
-- `DATABASE_URL`: PostgreSQL connection string
-- `QDRANT_URL`: Qdrant HTTP endpoint
+- `TIER2_HTTP_HOST`, `TIER2_HTTP_PORT`: HTTP analysis/control server
+- `TIER2_GRPC_HOST`, `TIER2_GRPC_PORT`: gRPC anomaly ingest server
+- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: PostgreSQL registry connection
+- `QDRANT_HOST`, `QDRANT_PORT`: Qdrant endpoint
+- `EMBEDDING_MODE`: `hash` by default, `external` for OpenAI-compatible embedding APIs
 
 ---
 

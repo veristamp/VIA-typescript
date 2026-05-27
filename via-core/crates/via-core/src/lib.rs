@@ -7,7 +7,7 @@
 //! - Feedback loop for continuous improvement
 //! - Memory-bounded profile registry with LRU eviction
 //! - Checkpoint/recovery for Bun-managed persistence
-//! - Tier-2 HTTP forwarding for anomaly signals
+//! - Tier-2 gRPC forwarding for anomaly signals
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{CStr, CString};
@@ -19,13 +19,15 @@ pub mod checkpoint;
 pub mod engine;
 pub mod feedback;
 pub mod forwarder;
+pub mod pb;
 pub mod policy;
 pub mod registry;
 pub mod signal;
+pub mod tier2;
 
 // Re-exports
 pub use checkpoint::{CheckpointError, CheckpointManager, CheckpointRequest, FullCheckpoint};
-pub use engine::{AnomalyProfile, AnomalyResult, ProfileConfig, SignalContext};
+pub use engine::{AnomalyProfile, ProfileConfig, SignalContext};
 pub use feedback::{
     FeedbackChannel, FeedbackEvent, FeedbackLabelClass, FeedbackSource, FeedbackStats,
 };
@@ -34,6 +36,10 @@ pub use policy::{PolicySnapshot, runtime as policy_runtime};
 pub use registry::{ProfileRegistry, RegistryConfig};
 pub use signal::{
     AnomalySignal, Attribution, BaselineSummary, DetectorId, DetectorScore, NUM_DETECTORS, Severity,
+};
+pub use tier2::{
+    IncidentDecision, IncidentDecisionStatus, TIER1_SCHEMA_VERSION, normalize_tier1_severity,
+    normalize_to_unix_seconds, resolve_incident_decision,
 };
 
 // ============================================================================
@@ -47,27 +53,9 @@ pub extern "C" fn via_create_profile() -> *mut AnomalyProfile {
     Box::into_raw(Box::new(profile))
 }
 
-/// Create a new anomaly profile with custom parameters (legacy interface)
-#[unsafe(no_mangle)]
-pub extern "C" fn create_profile(
-    hw_alpha: c_double,
-    hw_beta: c_double,
-    hw_gamma: c_double,
-    period: usize,
-    hist_bins: usize,
-    min_val: c_double,
-    max_val: c_double,
-    hist_decay: c_double,
-) -> *mut AnomalyProfile {
-    let profile = AnomalyProfile::new(
-        hw_alpha, hw_beta, hw_gamma, period, hist_bins, min_val, max_val, hist_decay,
-    );
-    Box::into_raw(Box::new(profile))
-}
-
 /// Free a profile
 #[unsafe(no_mangle)]
-pub extern "C" fn free_profile(ptr: *mut AnomalyProfile) {
+pub extern "C" fn via_free_profile(ptr: *mut AnomalyProfile) {
     if ptr.is_null() {
         return;
     }
@@ -76,36 +64,7 @@ pub extern "C" fn free_profile(ptr: *mut AnomalyProfile) {
     }
 }
 
-/// Process an event and return legacy AnomalyResult (for backward compatibility)
-#[unsafe(no_mangle)]
-pub extern "C" fn process_event(
-    ptr: *mut AnomalyProfile,
-    timestamp: c_ulonglong,
-    unique_id: *const c_char,
-    value: c_double,
-    out_result: *mut AnomalyResult,
-) {
-    if ptr.is_null() || unique_id.is_null() || out_result.is_null() {
-        return;
-    }
-
-    let c_str = unsafe { CStr::from_ptr(unique_id) };
-    let str_slice = match c_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let hash = xxhash_rust::xxh3::xxh3_64(str_slice.as_bytes());
-    let profile = unsafe { &mut *ptr };
-    let signal = profile.process_with_hash(timestamp, hash, value);
-    let result: AnomalyResult = signal.into();
-
-    unsafe {
-        *out_result = result;
-    }
-}
-
-/// Process an event and return full AnomalySignal (new interface)
+/// Process an event and return full AnomalySignal.
 ///
 /// Returns a heap-allocated AnomalySignal that must be freed with `via_free_signal`
 #[unsafe(no_mangle)]
@@ -222,7 +181,7 @@ pub extern "C" fn via_signal_to_json(ptr: *const AnomalySignal) -> *mut c_char {
 
 /// Reset a profile
 #[unsafe(no_mangle)]
-pub extern "C" fn reset_profile(ptr: *mut AnomalyProfile) {
+pub extern "C" fn via_reset_profile(ptr: *mut AnomalyProfile) {
     if ptr.is_null() {
         return;
     }
@@ -230,68 +189,14 @@ pub extern "C" fn reset_profile(ptr: *mut AnomalyProfile) {
     profile.reset();
 }
 
-/// Free a string allocated by Rust
 #[unsafe(no_mangle)]
-pub extern "C" fn free_string(s: *mut c_char) {
+pub extern "C" fn via_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
     unsafe {
         let _ = CString::from_raw(s);
     }
-}
-
-/// Alias for backward compatibility
-#[unsafe(no_mangle)]
-pub extern "C" fn via_free_string(s: *mut c_char) {
-    free_string(s);
-}
-
-// ============================================================================
-// FEEDBACK FFI
-// ============================================================================
-
-/// Send feedback to a profile (for weight learning)
-#[unsafe(no_mangle)]
-pub extern "C" fn via_send_feedback(
-    profile_ptr: *mut AnomalyProfile,
-    entity_hash: c_ulonglong,
-    signal_timestamp: c_ulonglong,
-    was_true_positive: bool,
-    detector_scores: *const f32,
-    feedback_source: u8,
-    confidence: f32,
-) -> bool {
-    if profile_ptr.is_null() || detector_scores.is_null() {
-        return false;
-    }
-
-    let profile = unsafe { &mut *profile_ptr };
-
-    // Copy detector scores
-    let scores: [f32; NUM_DETECTORS] = unsafe {
-        let mut arr = [0.0f32; NUM_DETECTORS];
-        for i in 0..NUM_DETECTORS {
-            arr[i] = *detector_scores.add(i);
-        }
-        arr
-    };
-
-    let source = match feedback_source {
-        0 => FeedbackSource::LLMAnalysis,
-        1 => FeedbackSource::HumanReview,
-        2 => FeedbackSource::AutoCorrelation,
-        _ => FeedbackSource::Timeout,
-    };
-
-    let event = if was_true_positive {
-        FeedbackEvent::true_positive(entity_hash, signal_timestamp, scores, source, confidence)
-    } else {
-        FeedbackEvent::false_positive(entity_hash, signal_timestamp, scores, source, confidence)
-    };
-
-    profile.apply_feedback(&[event]);
-    true
 }
 
 // ============================================================================
@@ -396,7 +301,7 @@ pub extern "C" fn via_num_detectors() -> u8 {
 const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
 
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
@@ -480,7 +385,7 @@ mod tests {
         assert!(!is_anomaly); // Warmup period
 
         via_free_signal(signal);
-        free_profile(profile);
+        via_free_profile(profile);
     }
 
     #[test]

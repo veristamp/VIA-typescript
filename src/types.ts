@@ -40,7 +40,7 @@ export interface CanonicalTier2Event {
 	attributes: Record<string, unknown>;
 }
 
-export type IncidentStatus = "new" | "suppressed" | "merged" | "escalated";
+export type IncidentStatus = "new" | "merged" | "escalated";
 
 export interface IncidentCandidate {
 	incidentId: string;

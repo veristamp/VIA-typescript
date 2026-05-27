@@ -74,7 +74,7 @@ fn main() {
         }
 
         // --- Tick Simulation ---
-        let batch = sim.tick(tick_ms as u64 * 1_000_000); // ns
+        let batch = sim.tick(tick_ms * 1_000_000); // ns
 
         // "Ingest" logs
         let mut batch_latency_sum = 0.0;
@@ -97,7 +97,7 @@ fn main() {
 
                 // Process Event
                 let result = profile.process(
-                    t as u64 * tick_ms, // timestamp
+                    t * tick_ms, // timestamp
                     &record.traceId,    // unique_id
                     latency,            // value
                 );

@@ -1,8 +1,5 @@
 import {
 	activateTier1Policy,
-	deletePatch,
-	getActivePatches,
-	getAllRules,
 	getCurrentActivePolicy,
 	getIncidentGraph,
 	getLatestDeadLetters,
@@ -12,7 +9,6 @@ import {
 	listTier2Decisions,
 	listTier2Incidents,
 	listTier2IncidentsForRun,
-	patchAnomaly,
 	saveDeadLetter,
 	saveIncidentGraph,
 	saveTier2Decision,
@@ -36,10 +32,6 @@ export const tier2IncidentRepository: Tier2IncidentRepository = {
 };
 
 export const tier2ControlRepository: Tier2ControlRepository = {
-	getActivePatches,
-	patchAnomaly,
-	deletePatch,
-	getAllRules,
 	listTier2Incidents,
 	upsertTier1PolicyArtifact,
 	activateTier1Policy,

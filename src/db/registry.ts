@@ -1,10 +1,9 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { settings } from "../config/settings";
 import type {
 	EvaluationMetric,
-	Patch,
 	Tier1PolicyArtifact,
 	Tier1PolicyMetric,
 	Tier2DeadLetter,
@@ -33,15 +32,6 @@ export async function initializeRegistry(): Promise<void> {
 			behavioral_profile JSONB,
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS patch_registry (
-			id SERIAL PRIMARY KEY,
-			rhythm_hash TEXT NOT NULL UNIQUE,
-			rule TEXT NOT NULL,
-			reason TEXT,
-			created_ts INTEGER,
-			is_active BOOLEAN DEFAULT TRUE
 		);
 
 		CREATE TABLE IF NOT EXISTS incident_graph (
@@ -153,44 +143,6 @@ export async function listSchemas(): Promise<string[]> {
 	});
 
 	return result.map((row) => row.sourceName);
-}
-
-// Patch registry functions
-export async function getActivePatches(): Promise<Patch[]> {
-	return db.query.patchRegistry.findMany({
-		where: and(
-			eq(schema.patchRegistry.rule, "ALLOW_LIST"),
-			eq(schema.patchRegistry.isActive, true),
-		),
-	});
-}
-
-export async function patchAnomaly(
-	rhythmHash: string,
-	reason: string,
-): Promise<void> {
-	await db.insert(schema.patchRegistry).values({
-		rhythmHash,
-		rule: "ALLOW_LIST",
-		reason,
-		createdTs: Math.floor(Date.now() / 1000),
-		isActive: true,
-	});
-}
-
-export async function deletePatch(rhythmHash: string): Promise<void> {
-	await db
-		.update(schema.patchRegistry)
-		.set({ isActive: false })
-		.where(eq(schema.patchRegistry.rhythmHash, rhythmHash));
-}
-
-export async function getAllRules(): Promise<Patch[]> {
-	const patches = await db.query.patchRegistry.findMany({
-		where: eq(schema.patchRegistry.isActive, true),
-	});
-
-	return patches;
 }
 
 // Incident graph functions

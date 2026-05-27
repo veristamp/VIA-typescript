@@ -1,7 +1,4 @@
-import {
-	normalizeTier1Severity,
-	type Tier1AnomalySignalV1,
-} from "../modules/tier2/contracts/tier1-signal";
+import type { Tier1AnomalySignalV1 } from "../modules/tier2/contracts/tier1-signal";
 import type { CanonicalTier2Event } from "../types";
 import { logger } from "../utils/logger";
 import type { ForensicAnalysisService } from "./forensic-analysis-service";
@@ -17,63 +14,15 @@ export class Tier2Service {
 		private incidents: IncidentService,
 	) {}
 
-	private normalizeToUnixSeconds(
-		ts: number | string,
-		attributes?: Record<string, unknown>,
-	): number {
-		const numericTs = typeof ts === "string" ? Number(ts) : ts;
-		if (!Number.isFinite(numericTs) || numericTs <= 0) {
-			return Math.floor(Date.now() / 1000);
-		}
-		// Benchmark runner sends deterministic relative nanoseconds.
-		if (
-			attributes &&
-			typeof attributes.benchmark_run_id === "string" &&
-			numericTs < 1e12
-		) {
-			return Math.floor(Date.now() / 1000) + Math.floor(numericTs / 1e9);
-		}
-		// Timestamp unit detection:
-		// - nanoseconds: > 1e15 (past year 2001) or > 1e10 (typical nanosecond timestamps)
-		// - milliseconds: > 1e12 and <= 1e15 
-		// - seconds: <= 1e12
-		if (numericTs > 1e15 || (numericTs > 1e10 && numericTs <= 1e12)) {
-			return Math.floor(numericTs / 1e9);
-		}
-		if (numericTs > 1e12) return Math.floor(numericTs / 1e3);
-		return Math.floor(numericTs);
-	}
-
-	private computeEventId(
-		signal: IncomingAnomalySignal,
-		timestamp: number,
-	): string {
-		if (typeof signal.event_id === "string" && signal.event_id.length > 0) {
-			return signal.event_id;
-		}
-		const seed =
-			`${signal.entity_hash}:${timestamp}:` +
-			`${signal.primary_detector}:${signal.score.toFixed(6)}:${signal.severity.toFixed(6)}`;
-		return Bun.hash.xxHash64(seed).toString(16);
-	}
-
 	private normalizeSignal(signal: IncomingAnomalySignal): CanonicalTier2Event {
-		const timestamp = this.normalizeToUnixSeconds(
-			signal.timestamp,
-			signal.attributes,
-		);
-		const severity = normalizeTier1Severity(
-			signal.severity,
-			signal.schema_version,
-		);
 		return {
-			eventId: this.computeEventId(signal, timestamp),
+			eventId: signal.event_id,
 			schemaVersion: signal.schema_version,
 			entityHash: signal.entity_hash,
 			entityId: `hash:${signal.entity_hash}`,
-			timestamp,
+			timestamp: signal.timestamp,
 			score: signal.score,
-			severity,
+			severity: signal.severity,
 			primaryDetector: signal.primary_detector,
 			detectorsFired: signal.detectors_fired,
 			confidence: signal.confidence,
@@ -133,7 +82,7 @@ export class Tier2Service {
 
 		await this.qdrant.ingestToTier2(events);
 
-		const timestamps = normalized.map(e => e.timestamp);
+		const timestamps = normalized.map((e) => e.timestamp);
 		const endTs = Math.max(...timestamps);
 		const startTs = Math.min(...timestamps);
 		const candidates = await this.forensic.deriveIncidentCandidates(

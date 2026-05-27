@@ -18,6 +18,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+type Point = Arc<[f64]>;
+type PointEntry = (u64, Point);
+type PointQueue = VecDeque<PointEntry>;
+
 // --- Serde Helpers for Arc<[f64]> ---
 
 mod serde_arc {
@@ -49,7 +53,7 @@ mod serde_points {
     use serde::ser::SerializeSeq;
 
     pub fn serialize<S>(
-        data: &VecDeque<(u64, Arc<[f64]>)>,
+        data: &PointQueue,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -88,7 +92,7 @@ mod serde_points {
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<VecDeque<(u64, Arc<[f64]>)>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PointQueue, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -96,7 +100,7 @@ mod serde_points {
         struct TupleVisitor;
 
         impl<'de> serde::de::Visitor<'de> for TupleVisitor {
-            type Value = VecDeque<(u64, Arc<[f64]>)>;
+            type Value = PointQueue;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("a sequence of (id, point) tuples")
@@ -186,7 +190,7 @@ struct RcTree {
     root: Option<RcNode>,
     /// Points currently in this tree (id -> point)
     #[serde(with = "serde_points")]
-    points: VecDeque<(u64, Arc<[f64]>)>,
+    points: PointQueue,
     /// Maximum points this tree can hold
     max_size: usize,
 }
@@ -520,8 +524,8 @@ impl StreamingRRCF {
     /// * `tree_size` - Size of each tree (typically 128-512)
     /// * `shingle_size` - Number of time steps to embed (for time series)
     pub fn new(dimensions: usize, num_trees: usize, tree_size: usize, shingle_size: usize) -> Self {
-        let n_trees = num_trees.max(1).min(100);
-        let t_size = tree_size.max(16).min(1024);
+        let n_trees = num_trees.clamp(1, 100);
+        let t_size = tree_size.clamp(16, 1024);
         let shingle = shingle_size.max(1);
 
         let trees: Vec<RcTree> = (0..n_trees).map(|_| RcTree::new(t_size)).collect();
@@ -751,7 +755,7 @@ mod tests {
         // Test score bounds
         let (score, _) = detector.update(100.0);
         assert!(
-            score >= 0.0 && score <= 1.0,
+            (0.0..=1.0).contains(&score),
             "Score should be normalized: {}",
             score
         );

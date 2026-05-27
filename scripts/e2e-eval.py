@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -41,7 +42,9 @@ class EvalConfig:
     tier1_only: bool = False
     verbose: bool = False
     tier2_url: str = "http://127.0.0.1:3000"
+    tier2_grpc_url: str = "http://127.0.0.1:3002"
     tier1_url: str = "http://127.0.0.1:3001"
+    seed: Optional[int] = None
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "via_registry"
@@ -176,12 +179,30 @@ def start_tier2(config: EvalConfig) -> Optional[subprocess.Popen]:
     """Start Tier-2 (Bun) server."""
     log("Starting Tier-2 (Bun)...", Colors.YELLOW, config.verbose)
 
+    env = os.environ.copy()
+    parsed_grpc = urlparse(config.tier2_grpc_url)
+    if parsed_grpc.hostname:
+        env["TIER2_GRPC_HOST"] = parsed_grpc.hostname
+    if parsed_grpc.port:
+        env["TIER2_GRPC_PORT"] = str(parsed_grpc.port)
+    env["TIER2_HTTP_HOST"] = "127.0.0.1"
+    env["TIER2_HTTP_PORT"] = str(urlparse(config.tier2_url).port or 3000)
+    env["EMBEDDING_MODE"] = "hash"
+    env["EMBEDDING_DIMENSION"] = "64"
+    env["POSTGRES_HOST"] = config.db_host
+    env["POSTGRES_PORT"] = str(config.db_port)
+    env["POSTGRES_DB"] = config.db_name
+    env["POSTGRES_USER"] = config.db_user
+    env["POSTGRES_PASSWORD"] = config.db_password
+    env["TIER1_BASE_URL"] = config.tier1_url
+
     try:
         proc = subprocess.Popen(
             ["bun", "run", "src/main.ts"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
             cwd=Path(__file__).parent.parent
         )
         return proc
@@ -203,7 +224,7 @@ def start_tier1(config: EvalConfig) -> Optional[subprocess.Popen]:
 
     env = os.environ.copy()
     if not config.tier1_only:
-        env["TIER2_URL"] = config.tier2_url
+        env["TIER2_GRPC_URL"] = config.tier2_grpc_url
     env["GATEKEEPER_ADDR"] = "0.0.0.0:3001"
 
     try:
@@ -223,27 +244,38 @@ def start_tier1(config: EvalConfig) -> Optional[subprocess.Popen]:
 
 def generate_events(config: EvalConfig):
     """Generate synthetic events with ground truth anomalies.
-    
-    Note: The tier1 detectors are tuned for benchmark-style log data.
-    Simple counter events may not trigger high detection scores.
-    This generates values that attempt to trigger ChangePoint/Burst detectors.
+
+    The generator intentionally varies timing, affected entities, and anomaly
+    shape per run. It avoids a single fixed benchmark window that detectors can
+    accidentally overfit to.
     """
     log(f"Generating {config.duration_seconds * config.entities} events...", Colors.YELLOW, config.verbose)
 
+    rng = random.Random(config.seed if config.seed is not None else time.time_ns())
     start_sec = int(time.time())
-    warmup_seconds = 20
-    anomaly_ranges = [
-        (30, 50),
-    ]
+    warmup_seconds = min(20, max(5, config.duration_seconds // 5))
+    usable_seconds = max(1, config.duration_seconds - warmup_seconds)
+    window_count = max(1, min(4, usable_seconds // 25))
+    anomaly_windows = []
+    for _ in range(window_count):
+        width = rng.randint(6, max(8, min(24, usable_seconds)))
+        start = rng.randint(warmup_seconds, max(warmup_seconds, config.duration_seconds - width))
+        entity_count = rng.randint(1, max(1, min(config.entities, config.entities // 2 or 1)))
+        affected = set(rng.sample(range(config.entities), entity_count))
+        mode = rng.choice(["spike", "drop", "drift", "burst"])
+        anomaly_windows.append((start, start + width, affected, mode))
 
     events = []
     ground_truth = {}
-    
+
     prev_values = {e: 15.0 + (e * 0.15) for e in range(config.entities)}
 
     for i in range(config.duration_seconds):
         sec_ts = start_sec + i
-        is_anomaly = any(r[0] <= i <= r[1] for r in anomaly_ranges)
+        active_windows = [
+            window for window in anomaly_windows if window[0] <= i <= window[1]
+        ]
+        is_anomaly = bool(active_windows)
         is_warmup = i < warmup_seconds
         ground_truth[sec_ts] = is_anomaly
 
@@ -251,14 +283,23 @@ def generate_events(config: EvalConfig):
             uid = f"entity_{e}"
             base = 15.0 + (e * 0.15)
             prev_val = prev_values[e]
-            
-            if is_anomaly and not is_warmup:
-                if i % 3 == 0:
-                    val = prev_val * random.uniform(3, 8)
+
+            active_for_entity = [
+                window for window in active_windows if e in window[2]
+            ]
+            if active_for_entity and not is_warmup:
+                _, window_end, _, mode = active_for_entity[0]
+                if mode == "spike":
+                    val = prev_val * rng.uniform(2.5, 7.0)
+                elif mode == "drop":
+                    val = max(0.1, prev_val * rng.uniform(0.02, 0.25))
+                elif mode == "drift":
+                    progress = max(1, window_end - i + 1)
+                    val = prev_val + rng.uniform(8, 24) / progress
                 else:
-                    val = prev_val + random.uniform(50, 200)
+                    val = base + rng.uniform(35, 140) if i % 2 == 0 else base + rng.uniform(-3, 3)
             else:
-                drift = random.uniform(-2, 2)
+                drift = rng.uniform(-2, 2)
                 val = base + drift
             
             val = max(0.1, val)
@@ -267,7 +308,7 @@ def generate_events(config: EvalConfig):
             events.append({
                 "u": uid,
                 "v": val,
-                "t": sec_ts * 1_000_000_000  # nanoseconds
+                "t": sec_ts * 1_000_000_000
             })
 
     return events, ground_truth, start_sec
@@ -538,8 +579,12 @@ def main():
                         help="Verbose output")
     parser.add_argument("--tier2-url", type=str, default="http://127.0.0.1:3000",
                         help="Tier-2 URL (default: http://127.0.0.1:3000)")
+    parser.add_argument("--tier2-grpc-url", type=str, default="http://127.0.0.1:3002",
+                        help="Tier-2 gRPC URL (default: http://127.0.0.1:3002)")
     parser.add_argument("--tier1-url", type=str, default="http://127.0.0.1:3001",
                         help="Tier-1 URL (default: http://127.0.0.1:3001)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Optional random seed for reproducible anomaly windows")
     parser.add_argument("--db-host", type=str, default="localhost",
                         help="Database host (default: localhost)")
     parser.add_argument("--db-port", type=int, default=5432,
@@ -562,7 +607,9 @@ def main():
         tier1_only=args.tier1_only,
         verbose=args.verbose,
         tier2_url=args.tier2_url,
+        tier2_grpc_url=args.tier2_grpc_url,
         tier1_url=args.tier1_url,
+        seed=args.seed,
         db_host=args.db_host,
         db_port=args.db_port,
         db_name=args.db_name,

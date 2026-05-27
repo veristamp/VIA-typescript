@@ -36,17 +36,9 @@ export class QdrantService {
 		this.client = new QdrantClient({
 			url: `http://${settings.qdrant.host}:${settings.qdrant.port}`,
 		});
-		const legacyUrl = process.env.EMBEDDING_URL;
-		this.embeddingBaseUrl =
-			process.env.EMBEDDING_BASE_URL ||
-			(legacyUrl ? legacyUrl.replace(/\/embeddings$/, "") : "") ||
-			"http://127.0.0.1:1234/v1";
-		this.embeddingModel =
-			process.env.EMBEDDING_MODEL || "text-embedding-nomic-embed-text-v1.5";
-		this.embeddingDimension = Number.parseInt(
-			process.env.EMBEDDING_DIMENSION || "64",
-			10,
-		);
+		this.embeddingBaseUrl = settings.embedding.baseUrl;
+		this.embeddingModel = settings.embedding.model;
+		this.embeddingDimension = settings.embedding.dimension;
 		this.tier2Dim = this.embeddingDimension;
 	}
 
@@ -134,7 +126,6 @@ export class QdrantService {
 
 		const data = (await response.json()) as {
 			data?: Array<{ embedding?: number[]; index?: number }>;
-			embeddings?: number[][];
 		};
 		this.embeddingUnavailableUntilMs = 0;
 		this.embeddingDegradedLogged = false;
@@ -151,10 +142,6 @@ export class QdrantService {
 					vectors[row.index] = this.normalizeEmbeddingDimensions(row.embedding);
 				}
 			}
-		} else if (data.embeddings && data.embeddings.length > 0) {
-			for (let i = 0; i < Math.min(data.embeddings.length, texts.length); i++) {
-				vectors[i] = this.normalizeEmbeddingDimensions(data.embeddings[i]);
-			}
 		}
 
 		for (let i = 0; i < vectors.length; i++) {
@@ -168,6 +155,17 @@ export class QdrantService {
 	private async getEmbeddings(texts: string[]): Promise<number[][]> {
 		if (texts.length === 0) {
 			return [];
+		}
+		if (settings.embedding.mode === "hash") {
+			return texts.map((text) => {
+				const cached = this.getCachedEmbedding(text);
+				if (cached) {
+					return cached;
+				}
+				const vector = this.generateFallbackVector(text);
+				this.cacheEmbedding(text, vector);
+				return vector;
+			});
 		}
 		const vectors: number[][] = new Array(texts.length);
 		const unresolved: Array<{ text: string; indices: number[] }> = [];
@@ -362,12 +360,12 @@ export class QdrantService {
 
 			await this.ensurePayloadIndex(collectionName, "start_ts", "integer");
 			await this.ensurePayloadIndex(collectionName, "timestamp", "integer");
-				await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
-				await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
-				await this.ensurePayloadIndex(collectionName, "entity_hash", "keyword");
-				await this.ensurePayloadIndex(collectionName, "group_key", "keyword");
-				await this.ensurePayloadIndex(collectionName, "service", "keyword");
-				await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
+			await this.ensurePayloadIndex(collectionName, "event_id", "keyword");
+			await this.ensurePayloadIndex(collectionName, "entity_id", "keyword");
+			await this.ensurePayloadIndex(collectionName, "entity_hash", "keyword");
+			await this.ensurePayloadIndex(collectionName, "group_key", "keyword");
+			await this.ensurePayloadIndex(collectionName, "service", "keyword");
+			await this.ensurePayloadIndex(collectionName, "rhythm_hash", "keyword");
 			await this.ensurePayloadIndex(collectionName, "body", {
 				type: "text",
 				tokenizer: "word",
@@ -431,7 +429,9 @@ export class QdrantService {
 						const idx = embedIndices[i];
 						denseVectors[idx] =
 							embedded[i] ??
-							this.generateFallbackVector(collectionEvents[idx].textForEmbedding);
+							this.generateFallbackVector(
+								collectionEvents[idx].textForEmbedding,
+							);
 					}
 				}
 				const points = collectionEvents.map((event, idx) => {
@@ -497,7 +497,10 @@ export class QdrantService {
 
 		try {
 			const queryClient = this.client as unknown as {
-				query: (collectionName: string, payload: Record<string, unknown>) => Promise<{ points?: QdrantScoredPoint[] } | QdrantScoredPoint[]>;
+				query: (
+					collectionName: string,
+					payload: Record<string, unknown>,
+				) => Promise<{ points?: QdrantScoredPoint[] } | QdrantScoredPoint[]>;
 			};
 			const response = await queryClient.query(collection, {
 				query: { context },
@@ -578,26 +581,32 @@ export class QdrantService {
 				}),
 			);
 
-			const grouped = new Map<string, QdrantScoredPoint>();
+			const grouped: QdrantScoredPoint[] = [];
 			for (const result of groupedResults) {
-				const groups = (result as { groups?: Array<{ id: string | number; hits?: Array<QdrantScoredPoint> }> }).groups ?? [];
+				const groups =
+					(
+						result as {
+							groups?: Array<{
+								id: string | number;
+								hits?: Array<QdrantScoredPoint>;
+							}>;
+						}
+					).groups ?? [];
 				for (const group of groups) {
-					const topHit = group.hits?.[0];
-					if (!topHit) continue;
-					const key = String(group.id);
-					if (grouped.has(key)) continue;
-					grouped.set(key, {
-						...topHit,
-						payload: {
-							...(topHit.payload ?? {}),
-							group_key: group.id,
-							count: group.hits?.length ?? 1,
-						},
-					});
+					for (const hit of group.hits ?? []) {
+						grouped.push({
+							...hit,
+							payload: {
+								...(hit.payload ?? {}),
+								group_key: group.id,
+								count: group.hits?.length ?? 1,
+							},
+						});
+					}
 				}
 			}
 
-			if (grouped.size === 0) {
+			if (grouped.length === 0) {
 				// Fallback for clusters when grouping is unavailable.
 				const results = await Promise.all(
 					collections.map((collection) =>
@@ -614,25 +623,18 @@ export class QdrantService {
 					const points =
 						(result as { points?: QdrantScoredPoint[] }).points ?? [];
 					for (const point of points) {
-						const groupKey = String(
-							point.payload?.group_key ??
-							point.payload?.rhythm_hash ??
-								point.payload?.entity_hash ??
-								point.payload?.entity_id ??
-								point.id,
-						);
-						if (!grouped.has(groupKey)) {
-							grouped.set(groupKey, point);
-						}
+						grouped.push(point);
 					}
 				}
 			}
 
-			const baseHits = Array.from(grouped.values());
+			const baseHits = grouped;
 			const refinedByCollection = await Promise.all(
 				collections.map(async (collection) => {
 					const localHits = baseHits.filter((hit) => {
-						const ts = Number(hit.payload?.start_ts ?? hit.payload?.timestamp ?? 0);
+						const ts = Number(
+							hit.payload?.start_ts ?? hit.payload?.timestamp ?? 0,
+						);
 						const localCollection = this.getDailyCollectionName(
 							this.tier2CollectionPrefix,
 							Number.isFinite(ts) ? Math.floor(ts) : startTs,
@@ -710,7 +712,9 @@ export class QdrantService {
 				}),
 			);
 			const allHits = groupedResults.flatMap((result) => {
-				const groups = (result as { groups?: Array<{ hits?: QdrantScoredPoint[] }> }).groups ?? [];
+				const groups =
+					(result as { groups?: Array<{ hits?: QdrantScoredPoint[] }> })
+						.groups ?? [];
 				return groups.flatMap((group) => group.hits ?? []);
 			});
 
@@ -727,6 +731,11 @@ export class QdrantService {
 		const cached = this.getCachedEmbedding(text);
 		if (cached) {
 			return cached;
+		}
+		if (settings.embedding.mode === "hash") {
+			const vector = this.generateFallbackVector(text);
+			this.cacheEmbedding(text, vector);
+			return vector;
 		}
 
 		const now = Date.now();
@@ -760,14 +769,11 @@ export class QdrantService {
 
 			const data = (await response.json()) as {
 				data?: Array<{ embedding?: number[] }>;
-				embeddings?: number[][];
 			};
 			this.embeddingUnavailableUntilMs = 0;
 			this.embeddingDegradedLogged = false;
 
-			const openAiVector = data.data?.[0]?.embedding;
-			const legacyVector = data.embeddings?.[0];
-			const selected = openAiVector || legacyVector;
+			const selected = data.data?.[0]?.embedding;
 			const vector = selected
 				? this.normalizeEmbeddingDimensions(selected)
 				: this.generateFallbackVector(text);
@@ -842,7 +848,6 @@ export class QdrantService {
 	}
 
 	private generateId(): string {
-		return crypto.randomUUID();
 		return crypto.randomUUID();
 	}
 }

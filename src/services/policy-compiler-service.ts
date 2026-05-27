@@ -31,16 +31,6 @@ export class PolicyCompilerService {
 
 		const entityHashes = this.parseEntityHash(incident.entityKey);
 
-		if (incident.status === "suppressed") {
-			return {
-				pattern_id: incident.incidentId,
-				action: "suppress",
-				entity_hashes: entityHashes,
-				min_confidence: confidence,
-				ttl_sec: 3600,
-			};
-		}
-
 		if (incident.status === "escalated" || incident.status === "merged") {
 			return {
 				pattern_id: incident.incidentId,

@@ -57,11 +57,10 @@ impl HyperLogLog {
 
         let mut estimate = self.alpha_mm / raw_sum;
 
-        if estimate <= 2.5 * (self.m as f64) {
-            if zeros > 0 {
+        if estimate <= 2.5 * (self.m as f64)
+            && zeros > 0 {
                 estimate = (self.m as f64) * ((self.m as f64) / (zeros as f64)).ln();
             }
-        }
 
         estimate
     }
